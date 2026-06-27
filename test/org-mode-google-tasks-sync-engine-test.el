@@ -104,5 +104,40 @@
          (data (org-mode-google-tasks-sync-engine--task->api-data task)))
     (should (equal "completed" (alist-get 'status data)))))
 
+(ert-deftest org-mode-google-tasks-sync-engine-test/run-keeps-state-idle-on-token-error ()
+  "If `engine--token' throws, `engine-run' must leave `--state' alone.
+Regression for the deadlock where a GPG-not-found error left the
+state machine stuck at `fetching', causing every subsequent tick to
+take the `Skip tick: sync in flight' early-return until Emacs restart."
+  (let ((org-mode-google-tasks-sync-engine--state 'idle)
+        (org-mode-google-tasks-sync-map '(("L" . ("/tmp/x.org" . "h")))))
+    (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--token)
+               (lambda () (signal 'error '("simulated GPG failure")))))
+      (should-error (org-mode-google-tasks-sync-engine-run 'incremental))
+      (should (eq org-mode-google-tasks-sync-engine--state 'idle)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/timeout-resets-stuck-state ()
+  "When the timeout timer fires while state is not idle, it resets to idle."
+  (let ((org-mode-google-tasks-sync-engine--state 'fetching))
+    (org-mode-google-tasks-sync-engine--on-timeout)
+    (should (eq org-mode-google-tasks-sync-engine--state 'idle))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/timeout-noop-when-idle ()
+  "If the sync completed before the timeout fires, the timer is a no-op."
+  (let ((org-mode-google-tasks-sync-engine--state 'idle))
+    (org-mode-google-tasks-sync-engine--on-timeout)
+    (should (eq org-mode-google-tasks-sync-engine--state 'idle))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/cancel-timeout-clears-timer ()
+  "Cancelling the timeout clears the timer slot."
+  (let ((org-mode-google-tasks-sync-engine--timeout-timer
+         (run-at-time 1000 nil #'ignore)))
+    (unwind-protect
+        (progn
+          (org-mode-google-tasks-sync-engine--cancel-timeout)
+          (should (null org-mode-google-tasks-sync-engine--timeout-timer)))
+      (when org-mode-google-tasks-sync-engine--timeout-timer
+        (cancel-timer org-mode-google-tasks-sync-engine--timeout-timer)))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

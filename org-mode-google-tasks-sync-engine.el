@@ -24,8 +24,20 @@
 (defconst org-mode-google-tasks-sync-engine--conflicts-buffer-name
   "*Google Tasks Conflicts*")
 
+(defcustom org-mode-google-tasks-sync-fetch-timeout 300
+  "Seconds after which a sync in flight is considered hung.
+When this many seconds pass between entering the `fetching' state
+and returning to `idle', the engine forcibly resets state so the
+next tick can try again.  Bump this if you have many lists or a
+slow network and healthy syncs are being treated as hung."
+  :type 'integer
+  :group 'org-mode-google-tasks-sync)
+
 (defvar org-mode-google-tasks-sync-engine--state 'idle
   "Current sync state.  One of idle, fetching, applying, pushing.")
+
+(defvar org-mode-google-tasks-sync-engine--timeout-timer nil
+  "Timer that resets state if a sync hangs past `org-mode-google-tasks-sync-fetch-timeout'.")
 
 (defun org-mode-google-tasks-sync-engine-log-buffer ()
   "Return (creating if needed) the log buffer."
@@ -135,17 +147,51 @@ LOCAL-MTIME is float-time; REMOTE-UPDATED is RFC3339 string."
     (org-mode-google-tasks-sync-engine--log
      "No lists configured (org-mode-google-tasks-sync-map empty)"))
    (t
-    (setq org-mode-google-tasks-sync-engine--state 'fetching)
-    (org-mode-google-tasks-sync-engine--log "Begin %s sync" mode)
+    ;; Fetch the token BEFORE transitioning to `fetching'.  This is the
+    ;; only synchronous step that can throw (e.g. EasyPG can't find gpg),
+    ;; and we don't want a failure here to leave the state machine stuck
+    ;; at `fetching' forever — that would make every subsequent tick
+    ;; take the `Skip tick: sync in flight' early-return.
     (let ((token (org-mode-google-tasks-sync-engine--token))
           (entries org-mode-google-tasks-sync-map))
+      (setq org-mode-google-tasks-sync-engine--state 'fetching)
+      (org-mode-google-tasks-sync-engine--arm-timeout)
+      (org-mode-google-tasks-sync-engine--log "Begin %s sync" mode)
       (org-mode-google-tasks-sync-engine--sync-next entries token mode)))))
+
+(defun org-mode-google-tasks-sync-engine--arm-timeout ()
+  "Arm the hung-sync timeout."
+  (when org-mode-google-tasks-sync-engine--timeout-timer
+    (cancel-timer org-mode-google-tasks-sync-engine--timeout-timer))
+  (setq org-mode-google-tasks-sync-engine--timeout-timer
+        (run-at-time org-mode-google-tasks-sync-fetch-timeout nil
+                     #'org-mode-google-tasks-sync-engine--on-timeout)))
+
+(defun org-mode-google-tasks-sync-engine--cancel-timeout ()
+  "Cancel any in-flight hung-sync timer."
+  (when org-mode-google-tasks-sync-engine--timeout-timer
+    (cancel-timer org-mode-google-tasks-sync-engine--timeout-timer)
+    (setq org-mode-google-tasks-sync-engine--timeout-timer nil)))
+
+(defun org-mode-google-tasks-sync-engine--on-timeout ()
+  "Called when a sync hangs past `org-mode-google-tasks-sync-fetch-timeout'.
+Resets state so the next tick can try again.  Stale plz callbacks
+may still fire afterwards; they'll be effectively no-ops on the
+state machine because state has already moved back to `idle'."
+  (setq org-mode-google-tasks-sync-engine--timeout-timer nil)
+  (when (not (eq org-mode-google-tasks-sync-engine--state 'idle))
+    (org-mode-google-tasks-sync-engine--log
+     "Sync hung past %ss in state=%s; resetting to idle"
+     org-mode-google-tasks-sync-fetch-timeout
+     org-mode-google-tasks-sync-engine--state)
+    (setq org-mode-google-tasks-sync-engine--state 'idle)))
 
 (defun org-mode-google-tasks-sync-engine--sync-next (entries token mode)
   "Drive sync sequentially over ENTRIES."
   (if (null entries)
       (progn
         (setq org-mode-google-tasks-sync-engine--state 'idle)
+        (org-mode-google-tasks-sync-engine--cancel-timeout)
         (org-mode-google-tasks-sync-engine--log "Sync complete"))
     (let* ((entry (car entries))
            (list-id (car entry))

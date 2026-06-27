@@ -173,6 +173,16 @@ in
       '';
     };
 
+    fetchTimeout = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 300;
+      description = ''
+        Seconds after which a sync in flight is considered hung; the
+        engine resets state so the next tick can try again.  Bump if
+        you have many lists or a slow network.
+      '';
+    };
+
     fullSyncInterval = lib.mkOption {
       type = lib.types.ints.positive;
       default = 86400;
@@ -239,6 +249,7 @@ in
               '(${mapAsElisp}))
         (setq org-mode-google-tasks-sync-tick-interval ${toString cfg.tickInterval})
         (setq org-mode-google-tasks-sync-poll-interval ${toString cfg.pollInterval})
+        (setq org-mode-google-tasks-sync-fetch-timeout ${toString cfg.fetchTimeout})
         (setq org-mode-google-tasks-sync-full-sync-interval ${toString cfg.fullSyncInterval})
         ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}
         ${cfg.extraConfig}
