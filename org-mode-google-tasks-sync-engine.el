@@ -87,6 +87,8 @@ the hook again — a 1-Hz loop).")
    :updated   (alist-get 'updated remote)
    :etag      (alist-get 'etag remote)
    :hash      nil
+   :position  (alist-get 'position remote)
+   :completed (alist-get 'completed remote)
    :marker    existing-marker))
 
 (defun org-mode-google-tasks-sync-engine--remote-due (remote)
@@ -294,11 +296,47 @@ state machine because state has already moved back to `idle'."
       (dolist (l local)
         (unless (org-mode-google-tasks-sync-org-task-id l)
           (org-mode-google-tasks-sync-engine--push-new token list-id l)))
+      (org-mode-google-tasks-sync-engine--sort-children parent-marker)
       (org-mode-google-tasks-sync-engine--set-last-sync
        file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
       (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
         (save-buffer))))
   (funcall done))
+
+(defun org-mode-google-tasks-sync-engine--task-sort-key ()
+  "Return the sort key for the current heading.
+Tuple: (done? position-string completed-string).  Used together with
+`--compare-tasks'."
+  (require 'org)
+  (list (and (org-get-todo-state)
+             (member (org-get-todo-state) org-done-keywords))
+        (or (org-entry-get nil "GTASK_POSITION") "")
+        (or (org-entry-get nil "GTASK_COMPLETED") "")))
+
+(defun org-mode-google-tasks-sync-engine--compare-tasks (a b)
+  "Compare two `--task-sort-key' tuples.
+TODOs come before DONEs; among TODOs, position ascending; among DONEs,
+completed timestamp descending (newest first)."
+  (cond
+   ((and (not (nth 0 a)) (nth 0 b)) t)
+   ((and (nth 0 a) (not (nth 0 b))) nil)
+   ((nth 0 a) (string> (nth 2 a) (nth 2 b)))
+   (t         (string< (nth 1 a) (nth 1 b)))))
+
+(defun org-mode-google-tasks-sync-engine--sort-children (parent-marker)
+  "Sort children of PARENT-MARKER by `--task-sort-key' / `--compare-tasks'.
+Returns silently when PARENT-MARKER is nil or points at no heading."
+  (when (and parent-marker (marker-buffer parent-marker))
+    (save-excursion
+      (goto-char parent-marker)
+      (when (org-at-heading-p)
+        (condition-case err
+            (org-sort-entries nil ?f
+                              #'org-mode-google-tasks-sync-engine--task-sort-key
+                              #'org-mode-google-tasks-sync-engine--compare-tasks)
+          (error
+           (org-mode-google-tasks-sync-engine--log
+            "Sort skipped: %S" err)))))))
 
 (defun org-mode-google-tasks-sync-engine--parent-marker (file parent)
   "Return marker of PARENT heading in FILE, creating the heading if absent.

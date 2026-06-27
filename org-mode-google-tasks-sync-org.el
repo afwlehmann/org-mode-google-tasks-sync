@@ -31,6 +31,17 @@
 (defconst org-mode-google-tasks-sync-org--prop-list "GTASK_LIST"
   "Property holding the Google Tasks list ID this heading belongs to.")
 
+(defconst org-mode-google-tasks-sync-org--prop-position "GTASK_POSITION"
+  "Property holding the server `position' lexicographic-rank string.
+Used by the sort step in the engine; not included in the canonical
+content hash because it's display metadata, not user content.")
+
+(defconst org-mode-google-tasks-sync-org--prop-completed "GTASK_COMPLETED"
+  "Property holding the server `completed' RFC3339 timestamp for done tasks.
+Used as a secondary sort key so DONE entries land in
+most-recently-completed-first order.  Not in the canonical hash;
+status (which IS in the hash) covers the meaningful state change.")
+
 (cl-defstruct org-mode-google-tasks-sync-org-task
   "In-memory representation of a synced task heading."
   id            ; string or nil for unsynced local tasks
@@ -43,6 +54,8 @@
   updated       ; string RFC3339 from server, or nil for unsynced
   etag          ; string from server, or nil
   hash          ; canonical content hash at last sync, or nil
+  position      ; string from server (lexicographic rank), or nil
+  completed     ; string RFC3339 from server for DONE tasks, or nil
   marker)       ; buffer marker pointing at the heading, or nil
 
 (defun org-mode-google-tasks-sync-org--priority-cookie-re ()
@@ -115,6 +128,8 @@ until neither prefix matches."
        :updated   (org-entry-get nil org-mode-google-tasks-sync-org--prop-updated)
        :etag      (org-entry-get nil org-mode-google-tasks-sync-org--prop-etag)
        :hash      (org-entry-get nil org-mode-google-tasks-sync-org--prop-hash)
+       :position  (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)
+       :completed (org-entry-get nil org-mode-google-tasks-sync-org--prop-completed)
        :marker    (point-marker)))))
 
 (defun org-mode-google-tasks-sync-org-canonical-hash (task)
@@ -161,6 +176,12 @@ Preserves the existing TODO keyword and priority cookie when updating title."
     (when (org-mode-google-tasks-sync-org-task-etag task)
       (org-entry-put nil org-mode-google-tasks-sync-org--prop-etag
                      (org-mode-google-tasks-sync-org-task-etag task)))
+    (when (org-mode-google-tasks-sync-org-task-position task)
+      (org-entry-put nil org-mode-google-tasks-sync-org--prop-position
+                     (org-mode-google-tasks-sync-org-task-position task)))
+    (when (org-mode-google-tasks-sync-org-task-completed task)
+      (org-entry-put nil org-mode-google-tasks-sync-org--prop-completed
+                     (org-mode-google-tasks-sync-org-task-completed task)))
     (org-entry-put nil org-mode-google-tasks-sync-org--prop-hash
                    (org-mode-google-tasks-sync-org-canonical-hash task))))
 

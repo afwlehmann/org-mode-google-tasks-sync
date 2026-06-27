@@ -198,5 +198,43 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
               (kill-buffer))))
       (delete-file file))))
 
+;;; Sort + position round-trip
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/remote->struct-extracts-position-and-completed ()
+  "`--remote-task->struct' picks up the new `position' and `completed' fields."
+  (let* ((remote '((id . "abc") (title . "X") (status . "completed")
+                   (position . "00000000000000000010")
+                   (completed . "2026-06-27T10:00:00.000Z")))
+         (task (org-mode-google-tasks-sync-engine--remote-task->struct
+                remote "L" nil)))
+    (should (equal "00000000000000000010"
+                   (org-mode-google-tasks-sync-org-task-position task)))
+    (should (equal "2026-06-27T10:00:00.000Z"
+                   (org-mode-google-tasks-sync-org-task-completed task)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/compare-tasks-orders-todo-before-done ()
+  (should (org-mode-google-tasks-sync-engine--compare-tasks
+           (list nil "01" "")
+           (list t   "00" "2026-06-27T10:00:00Z")))
+  (should-not (org-mode-google-tasks-sync-engine--compare-tasks
+               (list t   "00" "2026-06-27T10:00:00Z")
+               (list nil "01" ""))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/compare-tasks-todo-by-position-asc ()
+  (should (org-mode-google-tasks-sync-engine--compare-tasks
+           (list nil "00" "")
+           (list nil "10" "")))
+  (should-not (org-mode-google-tasks-sync-engine--compare-tasks
+               (list nil "10" "")
+               (list nil "00" ""))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/compare-tasks-done-by-completed-desc ()
+  (should (org-mode-google-tasks-sync-engine--compare-tasks
+           (list t "" "2026-06-27T12:00:00Z")     ; newer
+           (list t "" "2026-06-27T08:00:00Z")))   ; older
+  (should-not (org-mode-google-tasks-sync-engine--compare-tasks
+               (list t "" "2026-06-27T08:00:00Z")
+               (list t "" "2026-06-27T12:00:00Z"))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

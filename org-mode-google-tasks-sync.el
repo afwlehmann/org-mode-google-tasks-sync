@@ -64,6 +64,330 @@ one regardless of file mtimes."
 (defvar org-mode-google-tasks-sync--full-timer nil
   "Timer object for the periodic full reconciliation pass.")
 
+(defcustom org-mode-google-tasks-sync-hide-done-by-default nil
+  "Whether to auto-enable `org-mode-google-tasks-sync-hide-done-mode' on target files.
+When non-nil, opening any file referenced by
+`org-mode-google-tasks-sync-map' turns the mode on automatically.
+Per-buffer; the minor mode itself is opt-in for other files."
+  :type 'boolean
+  :group 'org-mode-google-tasks-sync)
+
+(defconst org-mode-google-tasks-sync--hide-done-spec
+  'org-mode-google-tasks-sync-hide-done
+  "Invisibility-spec symbol used by the hide-DONE minor mode.")
+
+(defun org-mode-google-tasks-sync--done-keyword-p (kw)
+  "Return non-nil if KW is a done keyword in the current org buffer."
+  (and kw (member kw (or (and (boundp 'org-done-keywords) org-done-keywords)
+                         '("DONE")))))
+
+(defun org-mode-google-tasks-sync--apply-done-overlay-at-point ()
+  "Cover the heading + subtree at point with an invisibility overlay.
+Idempotent — removes any prior hide-done overlay on the same range
+before adding."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((begin (line-beginning-position))
+          (end   (save-excursion (org-end-of-subtree t t) (point))))
+      (dolist (o (overlays-in begin end))
+        (when (eq (overlay-get o 'invisible)
+                  org-mode-google-tasks-sync--hide-done-spec)
+          (delete-overlay o)))
+      (let ((ov (make-overlay begin end)))
+        (overlay-put ov 'invisible org-mode-google-tasks-sync--hide-done-spec)
+        (overlay-put ov 'evaporate t)))))
+
+(defun org-mode-google-tasks-sync--remove-done-overlay-at-point ()
+  "Remove any hide-done overlay covering the heading at point."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((begin (line-beginning-position))
+          (end   (save-excursion (org-end-of-subtree t t) (point))))
+      (dolist (o (overlays-in begin end))
+        (when (eq (overlay-get o 'invisible)
+                  org-mode-google-tasks-sync--hide-done-spec)
+          (delete-overlay o))))))
+
+(defun org-mode-google-tasks-sync--apply-done-overlays-in-buffer ()
+  "Walk the buffer; apply a hide-done overlay to every DONE-keyword headline."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward org-heading-regexp nil t)
+      (when (org-mode-google-tasks-sync--done-keyword-p (org-get-todo-state))
+        (org-mode-google-tasks-sync--apply-done-overlay-at-point)))))
+
+(defun org-mode-google-tasks-sync--remove-done-overlays-in-buffer ()
+  "Remove every hide-done overlay in the buffer."
+  (save-restriction
+    (widen)
+    (dolist (o (overlays-in (point-min) (point-max)))
+      (when (eq (overlay-get o 'invisible)
+                org-mode-google-tasks-sync--hide-done-spec)
+        (delete-overlay o)))))
+
+(defun org-mode-google-tasks-sync--on-todo-state-change ()
+  "Maintain the hide-done overlay when a heading transitions in/out of DONE."
+  (when (bound-and-true-p org-mode-google-tasks-sync-hide-done-mode)
+    (if (org-mode-google-tasks-sync--done-keyword-p (org-get-todo-state))
+        (org-mode-google-tasks-sync--apply-done-overlay-at-point)
+      (org-mode-google-tasks-sync--remove-done-overlay-at-point))))
+
+;;;###autoload
+(define-minor-mode org-mode-google-tasks-sync-hide-done-mode
+  "Hide DONE-keyword headlines and their subtrees in the current buffer.
+Uses an invisibility overlay keyed by
+`org-mode-google-tasks-sync--hide-done-spec' so other folding (org-fold,
+narrow-to-subtree, etc.) is unaffected.
+
+To bring a task back from DONE to TODO when you've hit `C-c C-t' by
+mistake, run `M-x org-mode-google-tasks-sync-show-done', navigate to
+the task, `C-c C-t' again, then turn this mode back on."
+  :lighter " HideDone"
+  :group 'org-mode-google-tasks-sync
+  (if org-mode-google-tasks-sync-hide-done-mode
+      (progn
+        (add-to-invisibility-spec org-mode-google-tasks-sync--hide-done-spec)
+        (org-mode-google-tasks-sync--apply-done-overlays-in-buffer)
+        (add-hook 'org-after-todo-state-change-hook
+                  #'org-mode-google-tasks-sync--on-todo-state-change
+                  nil t))
+    (remove-hook 'org-after-todo-state-change-hook
+                 #'org-mode-google-tasks-sync--on-todo-state-change
+                 t)
+    (org-mode-google-tasks-sync--remove-done-overlays-in-buffer)
+    (remove-from-invisibility-spec org-mode-google-tasks-sync--hide-done-spec)))
+
+;;;###autoload
+(defun org-mode-google-tasks-sync-show-done ()
+  "Temporarily reveal DONE tasks by turning off the hide-done minor mode.
+Convenience wrapper — equivalent to
+`(org-mode-google-tasks-sync-hide-done-mode -1)' from a key binding."
+  (interactive)
+  (org-mode-google-tasks-sync-hide-done-mode -1))
+
+(defun org-mode-google-tasks-sync--maybe-enable-hide-done ()
+  "Auto-enable hide-done in a buffer if the file is a configured target.
+Used as a `find-file-hook' when
+`org-mode-google-tasks-sync-hide-done-by-default' is non-nil."
+  (when (and org-mode-google-tasks-sync-hide-done-by-default
+             (derived-mode-p 'org-mode)
+             (org-mode-google-tasks-sync--file-is-target-p (buffer-file-name)))
+    (org-mode-google-tasks-sync-hide-done-mode 1)))
+
+(add-hook 'find-file-hook #'org-mode-google-tasks-sync--maybe-enable-hide-done)
+
+(defconst org-mode-google-tasks-sync--trash-buffer-name
+  "*org-mode-google-tasks-sync-trash*")
+
+(defcustom org-mode-google-tasks-sync-persist-trash t
+  "When non-nil, persist the deletion trash buffer to disk.
+File path is `$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org'.
+Survives Emacs restarts so accidental deletions remain recoverable
+across sessions."
+  :type 'boolean
+  :group 'org-mode-google-tasks-sync)
+
+(defun org-mode-google-tasks-sync--trash-file ()
+  "Return the on-disk path of the deletion trash, or nil if disabled."
+  (when org-mode-google-tasks-sync-persist-trash
+    (expand-file-name
+     "org-mode-google-tasks-sync/trash.org"
+     (or (getenv "XDG_DATA_HOME")
+         (expand-file-name "~/.local/share")))))
+
+(defun org-mode-google-tasks-sync--trash-buffer ()
+  "Return the trash buffer, creating + loading from disk if needed."
+  (let ((buf (get-buffer org-mode-google-tasks-sync--trash-buffer-name)))
+    (or buf
+        (let ((b (get-buffer-create org-mode-google-tasks-sync--trash-buffer-name))
+              (path (org-mode-google-tasks-sync--trash-file)))
+          (with-current-buffer b
+            (org-mode)
+            (when (and path (file-exists-p path))
+              (insert-file-contents path))
+            (setq-local org-mode-google-tasks-sync--trash-source-path path))
+          b))))
+
+(defun org-mode-google-tasks-sync--trash-persist ()
+  "If trash persistence is enabled, write the trash buffer to disk."
+  (let ((path (org-mode-google-tasks-sync--trash-file)))
+    (when path
+      (make-directory (file-name-directory path) t)
+      (with-current-buffer (org-mode-google-tasks-sync--trash-buffer)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (write-region (point-min) (point-max) path nil 'quiet))))))
+
+(defun org-mode-google-tasks-sync--snapshot-to-trash (task source-file)
+  "Append a snapshot of TASK to the trash buffer.  SOURCE-FILE is where it lived."
+  (with-current-buffer (org-mode-google-tasks-sync--trash-buffer)
+    (goto-char (point-min))
+    (insert
+     (format
+      "* %s\n  :PROPERTIES:\n  :DELETED_AT: %s\n  :SOURCE_FILE: %s\n  :GTASK_LIST: %s\n  :GTASK_ID_ORIG: %s\n  :GTASK_STATUS: %s\n%s%s  :END:\n%s\n\n"
+      (or (org-mode-google-tasks-sync-org-task-title task) "<no title>")
+      (format-time-string "%Y-%m-%dT%H:%M:%S")
+      (or source-file "")
+      (or (org-mode-google-tasks-sync-org-task-list-id task) "")
+      (or (org-mode-google-tasks-sync-org-task-id task) "")
+      (symbol-name (or (org-mode-google-tasks-sync-org-task-status task)
+                       'needsAction))
+      (if (org-mode-google-tasks-sync-org-task-due task)
+          (format "  :GTASK_DUE: %s\n"
+                  (org-mode-google-tasks-sync-org-task-due task))
+        "")
+      (if (org-mode-google-tasks-sync-org-task-completed task)
+          (format "  :GTASK_COMPLETED: %s\n"
+                  (org-mode-google-tasks-sync-org-task-completed task))
+        "")
+      (or (org-mode-google-tasks-sync-org-task-notes task) "")))
+    (org-mode-google-tasks-sync--trash-persist)))
+
+;;;###autoload
+(defun org-mode-google-tasks-sync-delete-at-point ()
+  "Delete the task at point on Google and locally.
+Prompts for confirmation.  The deleted task is snapshotted into
+`*org-mode-google-tasks-sync-trash*' so a misclick is recoverable via
+`org-mode-google-tasks-sync-restore-at-point' (run from inside that
+buffer).  Local deletion happens only after Google confirms."
+  (interactive)
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not in an org-mode buffer"))
+  (let* ((list-id-prop (org-entry-get nil "GTASK_LIST" t))
+         (task (org-mode-google-tasks-sync-org-read-task-at-point list-id-prop))
+         (id (org-mode-google-tasks-sync-org-task-id task))
+         (list-id (org-mode-google-tasks-sync-org-task-list-id task))
+         (title (org-mode-google-tasks-sync-org-task-title task))
+         (source-file (buffer-file-name)))
+    (cond
+     ((not id)
+      (user-error "Heading has no :GTASK_ID:; not a synced task"))
+     ((not list-id)
+      (user-error "Heading is missing :GTASK_LIST: — can't tell which list to delete from"))
+     ((not (yes-or-no-p (format "Delete task %S from Google? " title)))
+      (message "Deletion cancelled."))
+     (t
+      (let ((token (org-mode-google-tasks-sync-engine--token))
+            (start (save-excursion (org-back-to-heading t) (point)))
+            (end   (save-excursion (org-end-of-subtree t t) (point))))
+        (org-mode-google-tasks-sync-api-delete-task
+         token list-id id
+         (lambda (_)
+           (org-mode-google-tasks-sync--snapshot-to-trash task source-file)
+           (with-current-buffer (find-file-noselect source-file)
+             (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+               (delete-region start end)
+               (save-buffer)))
+           (org-mode-google-tasks-sync-engine--log "Deleted: %s" title)
+           (message "Deleted %S; snapshot in *…-trash*" title))
+         (lambda (err)
+           (org-mode-google-tasks-sync-engine--log
+            "Delete error for %S: %S" title err)
+           (message "Delete failed: %S" err))))))))
+
+;;;###autoload
+(defun org-mode-google-tasks-sync-show-trash ()
+  "Pop to the deletion trash buffer."
+  (interactive)
+  (pop-to-buffer (org-mode-google-tasks-sync--trash-buffer)))
+
+;;;###autoload
+(defun org-mode-google-tasks-sync-new-task (title &optional due list-id)
+  "Insert a new `* TODO TITLE' under the configured parent and save.
+With one list configured the target is unambiguous; with multiple
+lists a completing-read prompt picks one.  Optional DUE is a
+YYYY-MM-DD string applied as SCHEDULED.  The after-save-hook
+triggers a sync ~1 s later, which POSTs the task to Google."
+  (interactive
+   (let* ((title (read-string "New task title: "))
+          (due (let ((s (read-string "Due date (YYYY-MM-DD, blank for none): ")))
+                 (and (not (string-empty-p s)) s)))
+          (list-id
+           (cond
+            ((null org-mode-google-tasks-sync-map)
+             (user-error "`org-mode-google-tasks-sync-map' is empty — set it first"))
+            ((= 1 (length org-mode-google-tasks-sync-map))
+             (caar org-mode-google-tasks-sync-map))
+            (t (completing-read
+                "List: "
+                (mapcar #'car org-mode-google-tasks-sync-map)
+                nil t)))))
+     (list title due list-id)))
+  (let* ((entry (cl-find-if (lambda (e) (string= (car e) list-id))
+                            org-mode-google-tasks-sync-map))
+         (file (car (cdr entry)))
+         (parent (cdr (cdr entry)))
+         (parent-marker (org-mode-google-tasks-sync-engine--parent-marker file parent)))
+    (unless parent-marker
+      (user-error "Could not locate parent heading %S in %s" parent file))
+    (with-current-buffer (marker-buffer parent-marker)
+      (save-excursion
+        (goto-char parent-marker)
+        (org-end-of-subtree t)
+        (unless (bolp) (insert "\n"))
+        (insert (format "** TODO %s\n" title))
+        (when due
+          (org-back-to-heading t)
+          (org-schedule nil due)))
+      (save-buffer))
+    (message "Inserted %S; will sync to Google within ~1 s." title)))
+
+;;;###autoload
+(defun org-mode-google-tasks-sync-restore-at-point ()
+  "Restore the deleted task at point in the trash buffer.
+Creates a fresh task on Google (the original is gone server-side),
+inserts the resulting heading under the configured parent in the
+original source file, and removes the entry from the trash buffer.
+
+Note: the new task gets a fresh `:GTASK_ID:'; the original ID and
+position are lost.  Only title, notes, status, due, and list-id
+survive."
+  (interactive)
+  (unless (equal (buffer-name) org-mode-google-tasks-sync--trash-buffer-name)
+    (user-error "Run this from inside the trash buffer"))
+  (save-excursion
+    (org-back-to-heading t)
+    (let* ((element (org-element-at-point))
+           (title (org-element-property :raw-value element))
+           (list-id (org-entry-get nil "GTASK_LIST"))
+           (status-str (or (org-entry-get nil "GTASK_STATUS") "needsAction"))
+           (due (org-entry-get nil "GTASK_DUE"))
+           (source-file (org-entry-get nil "SOURCE_FILE"))
+           (notes (org-mode-google-tasks-sync-org--headline-body element))
+           (entry (cl-find-if (lambda (e) (string= (car e) list-id))
+                              org-mode-google-tasks-sync-map))
+           (parent (and entry (cdr (cdr entry)))))
+      (unless (and list-id source-file parent)
+        (user-error "Missing :GTASK_LIST: / :SOURCE_FILE: in trash entry, or list not in config-map"))
+      (let* ((token (org-mode-google-tasks-sync-engine--token))
+             (data `((title . ,title)
+                     (notes . ,(or notes ""))
+                     (status . ,status-str)
+                     ,@(when due `((due . ,(concat due "T00:00:00.000Z")))))))
+        (org-mode-google-tasks-sync-api-insert-task
+         token list-id data
+         (lambda (resp)
+           (let* ((new-task
+                   (org-mode-google-tasks-sync-engine--remote-task->struct
+                    resp list-id nil))
+                  (parent-marker
+                   (org-mode-google-tasks-sync-engine--parent-marker
+                    source-file parent)))
+             (when parent-marker
+               (with-current-buffer (marker-buffer parent-marker)
+                 (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+                   (org-mode-google-tasks-sync-org-insert-task-under
+                    parent-marker new-task)
+                   (save-buffer))))
+             ;; Remove from trash.
+             (let ((begin (save-excursion (org-back-to-heading t) (point)))
+                   (end   (save-excursion (org-end-of-subtree t t) (point))))
+               (delete-region begin end))
+             (org-mode-google-tasks-sync--trash-persist)
+             (org-mode-google-tasks-sync-engine--log "Restored: %s" title)
+             (message "Restored %S to %s" title source-file)))
+         (lambda (err)
+           (message "Restore failed: %S" err)))))))
+
 
 ;;;###autoload
 (defun org-mode-google-tasks-sync-setup ()

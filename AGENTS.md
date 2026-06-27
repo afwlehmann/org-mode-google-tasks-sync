@@ -29,7 +29,17 @@ Fall back to plain `emacs` only when Nix isn't installed — the test helper han
 | `org-mode-google-tasks-sync-oauth.el` | Reads/writes `client_id`, `client_secret`, `refresh_token` via `auth-source`. Loopback HTTP server (`make-network-process` with `:host 'local :service t`). Token refresh via the Google token endpoint. |
 | `org-mode-google-tasks-sync-api.el` | `plz`-based wrappers for the Tasks API endpoints: `tasks.tasklists.list`, `tasks.tasks.list/get/insert/patch/delete`. Pagination via `nextPageToken`. JSON via native `json-parse-string` / `json-serialize`. |
 | `org-mode-google-tasks-sync-org.el` | Reads/writes a Google Task as an org heading. Defines the `org-mode-google-tasks-sync-org-task` struct. Computes the canonical content hash. Pure functions over the buffer at point. No network. |
-| `org-mode-google-tasks-sync-engine.el` | Reconciliation. The 4-cell conflict matrix. Quarantine buffer. Log buffer. State machine (`idle → fetching → applying → pushing → done`). |
+| `org-mode-google-tasks-sync-engine.el` | Reconciliation.  The 4-cell conflict matrix.  Quarantine buffer.  Log buffer.  State machine (`idle → fetching → applying → pushing → done`).  Post-apply children sort by `:GTASK_POSITION:` / `:GTASK_COMPLETED:` (TODOs by position asc, DONEs by completed desc). |
+
+The entry-point file also hosts buffer-local view/edit features: the
+`hide-done-mode` minor mode (invisibility overlays keyed by
+`org-mode-google-tasks-sync--hide-done-spec`, hooked to
+`org-after-todo-state-change-hook`), the `delete-at-point` /
+`show-trash` / `restore-at-point` trio that goes through the trash
+buffer (`*org-mode-google-tasks-sync-trash*`, optionally persisted to
+`$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org`), and the
+`new-task` convenience prompt.  These call into the engine and API
+client but don't change the state machine.
 
 `test/` contains `ert` suites and a `test-helper.el` that installs `plz` + `oauth2` into a project-local `.elpa` so the user's `~/.emacs.d` is never touched.
 
@@ -38,7 +48,7 @@ Fall back to plain `emacs` only when Nix isn't installed — the test helper han
 These hold throughout the codebase. Violating them produces silent data loss or sync loops, so flag any change that touches them.
 
 1. **The server's `updated` field is authoritative** for "did remote change?" — never compare local wall-clock time to server time. Local clock is only used for the loser-tiebreak in a both-sides-changed conflict.
-2. **The canonical content hash includes title, notes, status, due — and nothing else.** Not the GTASK_ID, etag, updated, hash itself, list-id, or priority cookie. Adding fields to the hash is a breaking change for users with existing data (their stored hashes will mismatch and trigger spurious pushes).
+2. **The canonical content hash includes title, notes, status, due — and nothing else.** Not the GTASK_ID, etag, updated, hash itself, list-id, priority cookie, **position, or completed timestamp**.  Position and completed are display metadata; including them would cause Google-side reordering or completion-time bumps to surface as spurious "local changed" detections.  Adding fields to the hash is a breaking change for users with existing data (their stored hashes will mismatch and trigger spurious pushes).
 3. **Property drawer values are read by `org-entry-get`, written by `org-entry-put`.** Never `re-search-forward` for `:GTASK_ID:` — that breaks if anyone reformats the drawer.
 4. **All HTTP goes through `plz` with `:then`/`:else` callbacks.** Never `accept-process-output` to "wait" — that blocks the UI on the timer tick.
 5. **`org-mode-google-tasks-sync-engine--state` must be `'idle` before a tick starts work.** Re-entrant ticks are no-ops; a sync in flight must complete (success or failure) before another can begin.
@@ -112,7 +122,7 @@ There are intentionally no tests that hit the real Google API — those would be
 ## Conventions
 
 - **No exceptions across module boundaries.** Each public function either returns a value or invokes a callback. Errors from `plz` go through the `:else` callback.
-- **Property keys are uppercase with `GTASK_` prefix** (`GTASK_ID`, `GTASK_UPDATED`, `GTASK_ETAG`, `GTASK_CONTENT_HASH`, `GTASK_LIST`). Defined as `defconst`s at the top of `org-mode-google-tasks-sync-org.el`.
+- **Property keys are uppercase with `GTASK_` prefix** (`GTASK_ID`, `GTASK_UPDATED`, `GTASK_ETAG`, `GTASK_CONTENT_HASH`, `GTASK_LIST`, `GTASK_POSITION`, `GTASK_COMPLETED`).  Defined as `defconst`s at the top of `org-mode-google-tasks-sync-org.el`.  Only the first five are sync-state; the last two are display metadata used by the children sort step in `--apply`.
 - **Auth-source `login` discriminators are full prefix** (`org-mode-google-tasks-sync-client-id`, etc.) so multiple Google-API-using packages can coexist in the same `~/.authinfo.gpg`.
 - **Modules talk through value types, not buffer state.** The engine never reads other modules' internal state directly; it calls accessor functions. The struct `org-mode-google-tasks-sync-org-task` is the contract between `*-org.el` and `*-engine.el`.
 - **Log liberally to the action log.** Every push, pull, delete, conflict, and error gets a line in `*org-mode-google-tasks-sync-log*`. Users debug from there.

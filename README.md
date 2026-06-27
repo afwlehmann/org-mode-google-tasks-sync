@@ -223,6 +223,70 @@ Run into trouble?  See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — covers `(e
 
 ---
 
+## Display, ordering, and editing
+
+The engine pulls everything from Google (including DONE tasks) into the synced subtree.  A few helpers keep the view manageable and the edits explicit.
+
+### Sort order
+
+After each sync the children of the parent heading are sorted to match Google's web UI:
+
+- **TODO entries first**, by Google's `position` field (ascending — the lexicographic-rank string the API maintains for in-list ordering).
+- **DONE entries after**, by `completed` timestamp (descending — most-recently-completed first).
+
+`:GTASK_POSITION:` and `:GTASK_COMPLETED:` are stored on each synced heading.  Headings you create manually under the parent (no position yet) sort to the top of the TODO section until the next sync POSTs them and Google assigns a position.
+
+Reordering inside the org file (`M-↑` / `M-↓`) is **not** pushed back to Google — the `tasks.move` integration is a v2 cut.  Any local reorder gets overwritten by the next sync.
+
+### Hide DONE tasks
+
+`M-x org-mode-google-tasks-sync-hide-done-mode` is a buffer-local minor mode that hides every DONE-keyword headline (and its subtree) via invisibility overlays.  Toggle on/off interactively, or auto-enable for target files:
+
+```elisp
+(setq org-mode-google-tasks-sync-hide-done-by-default t)
+```
+
+In the Home Manager module, `hideDoneByDefault = true;` sets the defcustom for you.
+
+To **un-DONE an accidentally completed task**:
+1. `M-x org-mode-google-tasks-sync-show-done` (or toggle the mode off).
+2. Navigate to the task.
+3. `C-c C-t` — back to TODO.  The hook removes the overlay automatically.
+4. Re-enable the mode if needed.
+
+### Create a new task
+
+Add a `* TODO` heading anywhere under the configured parent and save:
+
+```org
+* Inbox
+** TODO Buy milk
+```
+
+After-save-hook schedules a sync ~1 s later.  The engine sees the heading has no `:GTASK_ID:`, POSTs it to Google, writes `:GTASK_ID:`, `:GTASK_UPDATED:`, `:GTASK_ETAG:`, and `:GTASK_POSITION:` back into the property drawer.
+
+For a guided prompt: `M-x org-mode-google-tasks-sync-new-task` — asks for a title (and optional due date), inserts the heading under the parent (or completing-read across multiple configured lists), and saves.
+
+### Delete a task once and for all
+
+`M-x org-mode-google-tasks-sync-delete-at-point` on a synced heading:
+
+1. Asks `Delete task "Buy milk" from Google? (yes/no)`.
+2. On `yes`: calls `tasks.tasks.delete`, snapshots the task into `*org-mode-google-tasks-sync-trash*`, removes the heading + subtree locally, logs `Deleted: <title>`.
+3. Engine-side deletions in response to remote tombstones also drop into the same trash buffer.
+
+### Undo a deletion
+
+`M-x org-mode-google-tasks-sync-show-trash` opens the trash buffer.  Point on the deleted heading you want back, then `M-x org-mode-google-tasks-sync-restore-at-point`.
+
+Caveats:
+
+- Google's API doesn't support "un-delete" — the original task is gone server-side once the DELETE succeeds.  Restoration creates a **fresh** task with the same title, notes, status, and due date.  A new `:GTASK_ID:` and position are assigned by Google; the original ID is preserved in the trash entry under `:GTASK_ID_ORIG:` for human reference only.
+- The trash buffer is persisted to `$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org` by default; toggle via `org-mode-google-tasks-sync-persist-trash`.
+- The buffer never auto-purges.  Clean it yourself when you trust the deletions.
+
+---
+
 ## Nix integration
 
 The repo ships a flake with three outputs:

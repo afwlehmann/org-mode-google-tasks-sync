@@ -202,6 +202,21 @@ in
       '';
     };
 
+    hideDoneByDefault = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Whether to auto-enable
+        `org-mode-google-tasks-sync-hide-done-mode` on each configured
+        target file.  When true, DONE-keyword headlines (and their
+        subtrees) are hidden via invisibility overlays as soon as you
+        visit the file.  Toggle off with
+        `M-x org-mode-google-tasks-sync-show-done` to recover from an
+        accidental DONE; `C-c C-t` back to TODO then turn the mode
+        on again.
+      '';
+    };
+
     extraConfig = lib.mkOption {
       type = lib.types.lines;
       default = "";
@@ -251,6 +266,7 @@ in
         (setq org-mode-google-tasks-sync-poll-interval ${toString cfg.pollInterval})
         (setq org-mode-google-tasks-sync-fetch-timeout ${toString cfg.fetchTimeout})
         (setq org-mode-google-tasks-sync-full-sync-interval ${toString cfg.fullSyncInterval})
+        (setq org-mode-google-tasks-sync-hide-done-by-default ${if cfg.hideDoneByDefault then "t" else "nil"})
         ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}
         ${cfg.extraConfig}
         ;; --- end org-mode-google-tasks-sync ---
