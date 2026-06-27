@@ -219,6 +219,10 @@ Every delete is logged to `*org-mode-google-tasks-sync-log*` with the title and 
 
 ---
 
+Run into trouble?  See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — covers `(epg-error "no usable configuration" OpenPGP)`, sync-runs-but-nothing-changes, and refresh-token revocation.
+
+---
+
 ## Nix integration
 
 The repo ships a flake with three outputs:

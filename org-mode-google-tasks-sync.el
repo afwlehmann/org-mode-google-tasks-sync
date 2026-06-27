@@ -241,9 +241,16 @@ modified since the last sync, or the safety-net interval has elapsed."
          org-mode-google-tasks-sync-poll-interval)))
 
 (defun org-mode-google-tasks-sync--tick ()
-  "Wake-up handler: sync iff the predicate says we should."
+  "Wake-up handler: sync iff the predicate says we should.
+Errors during the sync are caught and routed to the log buffer so a
+misconfigured environment (e.g. unavailable GPG) doesn't spam
+*Messages* every `tick-interval' seconds.  The user is expected to
+look at *org-mode-google-tasks-sync-log* for diagnostic output."
   (when (org-mode-google-tasks-sync--should-sync-p)
-    (org-mode-google-tasks-sync)))
+    (condition-case err
+        (org-mode-google-tasks-sync)
+      (error
+       (org-mode-google-tasks-sync-engine--log "Tick failed: %S" err)))))
 
 (defun org-mode-google-tasks-sync--enable ()
   "Install timers and hooks."
