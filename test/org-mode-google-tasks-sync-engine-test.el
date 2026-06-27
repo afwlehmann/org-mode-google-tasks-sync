@@ -139,5 +139,33 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
       (when org-mode-google-tasks-sync-engine--timeout-timer
         (cancel-timer org-mode-google-tasks-sync-engine--timeout-timer)))))
 
+(require 'org-mode-google-tasks-sync)
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/after-save-hook-respects-inhibit ()
+  "After-save-hook is a no-op while the engine is saving its own write."
+  (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t)
+        (org-mode-google-tasks-sync-map
+         '(("L" . ("/tmp/gtasks-after-save-test.org" . "Inbox"))))
+        (scheduled nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest args) (setq scheduled args))))
+      (with-temp-buffer
+        (setq buffer-file-name "/tmp/gtasks-after-save-test.org")
+        (org-mode-google-tasks-sync--after-save-hook)
+        (should-not scheduled)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/after-save-hook-fires-when-not-inhibited ()
+  "After-save-hook schedules a sync when not inhibited and the file is a target."
+  (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks nil)
+        (org-mode-google-tasks-sync-map
+         '(("L" . ("/tmp/gtasks-after-save-test.org" . "Inbox"))))
+        (scheduled nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest args) (setq scheduled args))))
+      (with-temp-buffer
+        (setq buffer-file-name "/tmp/gtasks-after-save-test.org")
+        (org-mode-google-tasks-sync--after-save-hook)
+        (should scheduled)))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

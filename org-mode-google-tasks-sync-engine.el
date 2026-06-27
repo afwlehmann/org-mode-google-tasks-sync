@@ -39,6 +39,20 @@ slow network and healthy syncs are being treated as hung."
 (defvar org-mode-google-tasks-sync-engine--timeout-timer nil
   "Timer that resets state if a sync hangs past `org-mode-google-tasks-sync-fetch-timeout'.")
 
+(defvar org-mode-google-tasks-sync-engine--last-sync-time nil
+  "`float-time' of the last sync that reached `idle' again.
+The tick predicate compares each target file's mtime against this; a
+freshly-saved file by the engine itself doesn't re-trigger the next
+tick because we bump this both when entering `fetching' and when
+returning to `idle'.")
+
+(defvar org-mode-google-tasks-sync-engine--inhibit-save-hooks nil
+  "Bound to non-nil while the engine writes to a synced file.
+The entry-point's `after-save-hook' checks this and skips its work
+when set, so the engine's own buffer save doesn't kick off another
+sync in 1 second (which would itself save, which would trigger
+the hook again — a 1-Hz loop).")
+
 (defun org-mode-google-tasks-sync-engine-log-buffer ()
   "Return (creating if needed) the log buffer."
   (get-buffer-create org-mode-google-tasks-sync-engine--log-buffer-name))
@@ -155,6 +169,7 @@ LOCAL-MTIME is float-time; REMOTE-UPDATED is RFC3339 string."
     (let ((token (org-mode-google-tasks-sync-engine--token))
           (entries org-mode-google-tasks-sync-map))
       (setq org-mode-google-tasks-sync-engine--state 'fetching)
+      (setq org-mode-google-tasks-sync-engine--last-sync-time (float-time))
       (org-mode-google-tasks-sync-engine--arm-timeout)
       (org-mode-google-tasks-sync-engine--log "Begin %s sync" mode)
       (org-mode-google-tasks-sync-engine--sync-next entries token mode)))))
@@ -191,6 +206,10 @@ state machine because state has already moved back to `idle'."
   (if (null entries)
       (progn
         (setq org-mode-google-tasks-sync-engine--state 'idle)
+        ;; Bump last-sync-time AFTER all per-list saves so the tick
+        ;; predicate sees mtime <= last-sync-time on the next round
+        ;; and doesn't re-fire on our own writes.
+        (setq org-mode-google-tasks-sync-engine--last-sync-time (float-time))
         (org-mode-google-tasks-sync-engine--cancel-timeout)
         (org-mode-google-tasks-sync-engine--log "Sync complete"))
     (let* ((entry (car entries))
@@ -261,7 +280,8 @@ state machine because state has already moved back to `idle'."
           (org-mode-google-tasks-sync-engine--push-new token list-id l)))
       (org-mode-google-tasks-sync-engine--set-last-sync
        file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
-      (save-buffer)))
+      (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+        (save-buffer))))
   (funcall done))
 
 (defun org-mode-google-tasks-sync-engine--parent-marker (file parent)

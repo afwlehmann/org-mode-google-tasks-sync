@@ -64,8 +64,6 @@ one regardless of file mtimes."
 (defvar org-mode-google-tasks-sync--full-timer nil
   "Timer object for the periodic full reconciliation pass.")
 
-(defvar org-mode-google-tasks-sync--last-sync-time nil
-  "`float-time' of the last successful sync, or nil if none yet this session.")
 
 ;;;###autoload
 (defun org-mode-google-tasks-sync-setup ()
@@ -105,7 +103,6 @@ re-authorizing after a token revocation)."
 (defun org-mode-google-tasks-sync ()
   "Run one incremental sync pass for every configured list."
   (interactive)
-  (setq org-mode-google-tasks-sync--last-sync-time (float-time))
   (org-mode-google-tasks-sync-engine-run 'incremental))
 
 ;;;###autoload
@@ -193,10 +190,14 @@ Exits non-zero on timeout (5 minutes)."
   (org-mode-google-tasks-sync-engine-discover-lists-batch))
 
 (defun org-mode-google-tasks-sync--after-save-hook ()
-  "If the saved file is a configured sync target, schedule a sync soon."
-  (when (and org-mode-google-tasks-sync-map
-             (org-mode-google-tasks-sync--file-is-target-p (buffer-file-name)))
-    (run-at-time 1 nil #'org-mode-google-tasks-sync)))
+  "If the saved file is a configured sync target, schedule a sync soon.
+Bails out when `org-mode-google-tasks-sync-engine--inhibit-save-hooks'
+is bound (the engine is saving the file itself), otherwise the
+engine's own write would re-trigger the sync chain on every save."
+  (unless org-mode-google-tasks-sync-engine--inhibit-save-hooks
+    (when (and org-mode-google-tasks-sync-map
+               (org-mode-google-tasks-sync--file-is-target-p (buffer-file-name)))
+      (run-at-time 1 nil #'org-mode-google-tasks-sync))))
 
 (defun org-mode-google-tasks-sync--file-is-target-p (file)
   "Return non-nil if FILE is the target of any entry in `org-mode-google-tasks-sync-map'."
@@ -221,23 +222,23 @@ Exits non-zero on timeout (5 minutes)."
 Returns t when no sync has happened yet this session, which makes the
 first tick fire a sync (so the user sees a sync within
 `org-mode-google-tasks-sync-tick-interval' seconds of starting Emacs)."
-  (or (null org-mode-google-tasks-sync--last-sync-time)
+  (or (null org-mode-google-tasks-sync-engine--last-sync-time)
       (cl-some
        (lambda (entry)
          (let* ((file (car (cdr entry)))
                 (attrs (and file (file-exists-p file) (file-attributes file))))
            (when attrs
              (> (float-time (file-attribute-modification-time attrs))
-                org-mode-google-tasks-sync--last-sync-time))))
+                org-mode-google-tasks-sync-engine--last-sync-time))))
        org-mode-google-tasks-sync-map)))
 
 (defun org-mode-google-tasks-sync--should-sync-p ()
   "Return non-nil if the tick should kick off a sync.
 True when: no sync has happened yet, or a configured file has been
 modified since the last sync, or the safety-net interval has elapsed."
-  (or (null org-mode-google-tasks-sync--last-sync-time)
+  (or (null org-mode-google-tasks-sync-engine--last-sync-time)
       (org-mode-google-tasks-sync--any-file-modified-p)
-      (> (- (float-time) org-mode-google-tasks-sync--last-sync-time)
+      (> (- (float-time) org-mode-google-tasks-sync-engine--last-sync-time)
          org-mode-google-tasks-sync-poll-interval)))
 
 (defun org-mode-google-tasks-sync--tick ()
@@ -258,7 +259,7 @@ look at *org-mode-google-tasks-sync-log* for diagnostic output."
     (cancel-timer org-mode-google-tasks-sync--timer))
   (when org-mode-google-tasks-sync--full-timer
     (cancel-timer org-mode-google-tasks-sync--full-timer))
-  (setq org-mode-google-tasks-sync--last-sync-time nil)
+  (setq org-mode-google-tasks-sync-engine--last-sync-time nil)
   ;; First tick fires 1 s after enable so the user gets an immediate sync
   ;; on Emacs start; subsequent ticks fire every `tick-interval'.
   (setq org-mode-google-tasks-sync--timer
