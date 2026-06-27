@@ -6,15 +6,30 @@ This file gives an AI agent (or new human contributor) what they need to make sa
 
 Pure-Elisp two-way sync between org-mode and Google Tasks. Triggered by an Emacs timer + `after-save-hook`. Last-write-wins with conflict quarantine. Auto-delete in both directions. Single Google account, single subtree per list, no `position` sync in v1.
 
+## Use Nix when it's available
+
+If `command -v nix` succeeds, **prefer `nix develop --command ...` for every Emacs invocation** (running tests, byte-compiling, exploring the package in a REPL, anything that needs `plz` or `oauth2`). The dev shell guarantees the deps are on the load-path and avoids touching `test/.elpa/` or the user's `~/.emacs.d`.
+
+Quick reference:
+
+```sh
+nix develop --command emacs --batch -l test/run-tests.el -f ert-run-tests-batch-and-exit
+nix develop --command emacs --batch -L . -f batch-byte-compile *.el
+nix flake check                                            # fully sandboxed CI-equivalent run
+nix build .#default                                        # produce the byte-compiled package
+```
+
+Fall back to plain `emacs` only when Nix isn't installed — the test helper handles that case by installing deps into `test/.elpa/`.
+
 ## Module map
 
 | File | Responsibility |
 |---|---|
-| `org-mode-google-tasks.el` | Entry point. Autoloads, `defcustom`s, public interactive commands, global minor mode. Has no logic of its own beyond timer/hook plumbing. |
-| `org-mode-google-tasks-oauth.el` | Reads/writes `client_id`, `client_secret`, `refresh_token` via `auth-source`. Loopback HTTP server (`make-network-process` with `:host 'local :service t`). Token refresh via the Google token endpoint. |
-| `org-mode-google-tasks-api.el` | `plz`-based wrappers for the Tasks API endpoints: `tasks.tasklists.list`, `tasks.tasks.list/get/insert/patch/delete`. Pagination via `nextPageToken`. JSON via native `json-parse-string` / `json-serialize`. |
-| `org-mode-google-tasks-org.el` | Reads/writes a Google Task as an org heading. Defines the `org-mode-google-tasks-org-task` struct. Computes the canonical content hash. Pure functions over the buffer at point. No network. |
-| `org-mode-google-tasks-engine.el` | Reconciliation. The 4-cell conflict matrix. Quarantine buffer. Log buffer. State machine (`idle → fetching → applying → pushing → done`). |
+| `org-mode-google-tasks-sync.el` | Entry point. Autoloads, `defcustom`s, public interactive commands, global minor mode. Has no logic of its own beyond timer/hook plumbing. |
+| `org-mode-google-tasks-sync-oauth.el` | Reads/writes `client_id`, `client_secret`, `refresh_token` via `auth-source`. Loopback HTTP server (`make-network-process` with `:host 'local :service t`). Token refresh via the Google token endpoint. |
+| `org-mode-google-tasks-sync-api.el` | `plz`-based wrappers for the Tasks API endpoints: `tasks.tasklists.list`, `tasks.tasks.list/get/insert/patch/delete`. Pagination via `nextPageToken`. JSON via native `json-parse-string` / `json-serialize`. |
+| `org-mode-google-tasks-sync-org.el` | Reads/writes a Google Task as an org heading. Defines the `org-mode-google-tasks-sync-org-task` struct. Computes the canonical content hash. Pure functions over the buffer at point. No network. |
+| `org-mode-google-tasks-sync-engine.el` | Reconciliation. The 4-cell conflict matrix. Quarantine buffer. Log buffer. State machine (`idle → fetching → applying → pushing → done`). |
 
 `test/` contains `ert` suites and a `test-helper.el` that installs `plz` + `oauth2` into a project-local `.elpa` so the user's `~/.emacs.d` is never touched.
 
@@ -26,8 +41,8 @@ These hold throughout the codebase. Violating them produces silent data loss or 
 2. **The canonical content hash includes title, notes, status, due — and nothing else.** Not the GTASK_ID, etag, updated, hash itself, list-id, or priority cookie. Adding fields to the hash is a breaking change for users with existing data (their stored hashes will mismatch and trigger spurious pushes).
 3. **Property drawer values are read by `org-entry-get`, written by `org-entry-put`.** Never `re-search-forward` for `:GTASK_ID:` — that breaks if anyone reformats the drawer.
 4. **All HTTP goes through `plz` with `:then`/`:else` callbacks.** Never `accept-process-output` to "wait" — that blocks the UI on the timer tick.
-5. **`org-mode-google-tasks-engine--state` must be `'idle` before a tick starts work.** Re-entrant ticks are no-ops; a sync in flight must complete (success or failure) before another can begin.
-6. **Priority cookies (`[#A]`/`[#B]`/`[#C]`) are stripped from titles on push and preserved on pull.** `org-mode-google-tasks-org--replace-title` rewrites only the title portion of a headline, keeping the TODO keyword and any priority prefix.
+5. **`org-mode-google-tasks-sync-engine--state` must be `'idle` before a tick starts work.** Re-entrant ticks are no-ops; a sync in flight must complete (success or failure) before another can begin.
+6. **Priority cookies (`[#A]`/`[#B]`/`[#C]`) are stripped from titles on push and preserved on pull.** `org-mode-google-tasks-sync-org--replace-title` rewrites only the title portion of a headline, keeping the TODO keyword and any priority prefix.
 7. **Only direct children of the configured parent heading are synced.** `collect-tasks-under` enforces this. Grandchildren and beyond stay local-only.
 8. **Secrets never get written directly to `~/.authinfo.gpg`.** Always go through `auth-source-search :create t` and call the returned `:save-function`. Bypassing this breaks the macOS Keychain / pass backends.
 
@@ -47,7 +62,7 @@ remote-changed? = (response.updated         ≠ stored :GTASK_UPDATED:)
 | no | yes | `pull` |
 | yes | yes | `conflict-remote-wins` if `remote.updated > local-mtime`, else `conflict-local-wins`; copy losing side to `*Google Tasks Conflicts*` |
 
-Pure function: `org-mode-google-tasks-engine--decide`. Don't make this stateful — it's fully covered by `ert` and reasoning about it depends on functional purity.
+Pure function: `org-mode-google-tasks-sync-engine--decide`. Don't make this stateful — it's fully covered by `ert` and reasoning about it depends on functional purity.
 
 ## State machine
 
@@ -68,37 +83,51 @@ Pure function: `org-mode-google-tasks-engine--decide`. Don't make this stateful 
 
 ## Running tests
 
+**If Nix is available** (check with `command -v nix`), prefer the dev shell for any Emacs invocation — tests, byte-compile, interactive REPL, anything. The dev shell provides Emacs with `plz` and `oauth2` already on the load-path, so nothing gets installed into the user's environment and nothing gets written to `test/.elpa/`.
+
+```sh
+nix develop --command emacs --batch -l test/run-tests.el -f ert-run-tests-batch-and-exit
+```
+
+For a fully sandboxed run (slower; builds a fresh derivation each time):
+
+```sh
+nix flake check
+```
+
+**If Nix is not available**, fall back to plain Emacs:
+
 ```sh
 emacs --batch -l test/run-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-On first run this installs `plz` and `oauth2` into `test/.elpa/`. Subsequent runs are fast.
+On first plain-Emacs run this installs `plz` and `oauth2` into `test/.elpa/`; subsequent runs are fast. `test-helper.el` detects the situation automatically — if the deps are already on the load-path (as inside `nix develop`), it skips the install.
 
 Test files:
-- `test/org-mode-google-tasks-org-test.el` — parser, hash stability, round-trip serialization.
-- `test/org-mode-google-tasks-engine-test.el` — 4-cell conflict matrix, RFC3339 parsing, remote↔struct conversion, API payload shape.
+- `test/org-mode-google-tasks-sync-org-test.el` — parser, hash stability, round-trip serialization.
+- `test/org-mode-google-tasks-sync-engine-test.el` — 4-cell conflict matrix, RFC3339 parsing, remote↔struct conversion, API payload shape.
 
 There are intentionally no tests that hit the real Google API — those would be flaky and require credentials. Integration testing is manual; see the README troubleshooting section and the verification plan in the original design doc at `~/.claude/plans/i-need-tooling-to-dapper-moonbeam.md`.
 
 ## Conventions
 
 - **No exceptions across module boundaries.** Each public function either returns a value or invokes a callback. Errors from `plz` go through the `:else` callback.
-- **Property keys are uppercase with `GTASK_` prefix** (`GTASK_ID`, `GTASK_UPDATED`, `GTASK_ETAG`, `GTASK_CONTENT_HASH`, `GTASK_LIST`). Defined as `defconst`s at the top of `org-mode-google-tasks-org.el`.
-- **Auth-source `login` discriminators are full prefix** (`org-mode-google-tasks-client-id`, etc.) so multiple Google-API-using packages can coexist in the same `~/.authinfo.gpg`.
-- **Modules talk through value types, not buffer state.** The engine never reads other modules' internal state directly; it calls accessor functions. The struct `org-mode-google-tasks-org-task` is the contract between `*-org.el` and `*-engine.el`.
-- **Log liberally to the action log.** Every push, pull, delete, conflict, and error gets a line in `*org-mode-google-tasks-log*`. Users debug from there.
+- **Property keys are uppercase with `GTASK_` prefix** (`GTASK_ID`, `GTASK_UPDATED`, `GTASK_ETAG`, `GTASK_CONTENT_HASH`, `GTASK_LIST`). Defined as `defconst`s at the top of `org-mode-google-tasks-sync-org.el`.
+- **Auth-source `login` discriminators are full prefix** (`org-mode-google-tasks-sync-client-id`, etc.) so multiple Google-API-using packages can coexist in the same `~/.authinfo.gpg`.
+- **Modules talk through value types, not buffer state.** The engine never reads other modules' internal state directly; it calls accessor functions. The struct `org-mode-google-tasks-sync-org-task` is the contract between `*-org.el` and `*-engine.el`.
+- **Log liberally to the action log.** Every push, pull, delete, conflict, and error gets a line in `*org-mode-google-tasks-sync-log*`. Users debug from there.
 - **No `accept-process-output` in tick path.** `plz` callbacks only. The one exception is `oauth-make-token`, where a synchronous refresh is acceptable because it's outside the tick and rare.
 
 ## How to add a new synced field end-to-end
 
 Example: suppose Google adds a `priority` field to the Tasks API. To wire it in:
 
-1. **Struct**: add a slot to `org-mode-google-tasks-org-task` (`cl-defstruct` in `org-mode-google-tasks-org.el`).
-2. **Read from org**: extend `org-mode-google-tasks-org-read-task-at-point` to populate the new slot from the heading.
-3. **Write to org**: extend `org-mode-google-tasks-org-write-task` to render the new slot into the heading.
-4. **Canonical hash**: add the new value to the projection in `org-mode-google-tasks-org-canonical-hash` (this changes the hash for existing data — bump a version constant if you want to handle migration gracefully).
-5. **Remote → struct**: extend `org-mode-google-tasks-engine--remote-task->struct` to read the field from the API response.
-6. **Struct → API payload**: extend `org-mode-google-tasks-engine--task->api-data` to emit the field on push.
+1. **Struct**: add a slot to `org-mode-google-tasks-sync-org-task` (`cl-defstruct` in `org-mode-google-tasks-sync-org.el`).
+2. **Read from org**: extend `org-mode-google-tasks-sync-org-read-task-at-point` to populate the new slot from the heading.
+3. **Write to org**: extend `org-mode-google-tasks-sync-org-write-task` to render the new slot into the heading.
+4. **Canonical hash**: add the new value to the projection in `org-mode-google-tasks-sync-org-canonical-hash` (this changes the hash for existing data — bump a version constant if you want to handle migration gracefully).
+5. **Remote → struct**: extend `org-mode-google-tasks-sync-engine--remote-task->struct` to read the field from the API response.
+6. **Struct → API payload**: extend `org-mode-google-tasks-sync-engine--task->api-data` to emit the field on push.
 7. **Tests**: add `ert` cases in both `org-test.el` (parser round-trip, hash sensitivity) and `engine-test.el` (struct conversion, API payload).
 8. **Schema mapping table**: update README.md's "What is and isn't synced" table.
 

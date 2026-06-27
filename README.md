@@ -1,4 +1,4 @@
-# org-mode-google-tasks
+# org-mode-google-tasks-sync
 
 Pure-Elisp two-way sync between your org-mode files and **Google Tasks**.
 
@@ -16,7 +16,7 @@ This package syncs **Google Tasks only** — not Google Calendar events. If you 
 - No background daemon, no extra runtime — everything lives in Emacs.
 - Google Tasks has no push API, so all sync is poll-based.
 - State (per-task ID, ETag, server `updated` timestamp, content hash) lives in each heading's `:PROPERTIES:` drawer. There is no external database.
-- Secrets (`client_id`, `client_secret`, `refresh_token`) live in `~/.authinfo.gpg` via `auth-source`.
+- Secrets are accessed exclusively through Emacs's `auth-source`.  By default all three (`client_id`, `client_secret`, `refresh_token`) live in `~/.authinfo.gpg`.  When the Home Manager bridge is used instead, all three live in a single chmod-0600 netrc file under `$XDG_DATA_HOME` — `~/.authinfo.gpg` is never touched by this package.
 
 ## What is and isn't synced
 
@@ -31,7 +31,6 @@ This package syncs **Google Tasks only** — not Google Calendar events. If you 
 | Tag ordering / `position` | ❌ Not synced in v1 |
 | Recurring tasks | ❌ Google Tasks API is read-only for recurrence |
 | `DEADLINE:` | ❌ Only `SCHEDULED:` maps to Google's `due` |
-| Multiple Google accounts | ❌ Single account in v1 |
 
 ---
 
@@ -54,7 +53,7 @@ This package syncs **Google Tasks only** — not Google Calendar events. If you 
    - **Click "PUBLISH APP"** to move publishing status from Testing to In production. This avoids the 7-day refresh-token expiry that applies in Testing mode. For a single-user personal app you can stay unverified forever — Google's verification requirements only kick in above 100 users.
 4. **APIs & Services → Credentials → + Create credentials → OAuth client ID**:
    - Application type: **Desktop app**.
-   - Name: anything (e.g. "Emacs org-mode-google-tasks").
+   - Name: anything (e.g. "Emacs org-mode-google-tasks-sync").
    - Click Create.
 5. **Save** the resulting `client_id` and `client_secret`. You'll paste them into Emacs in the next section.
 
@@ -62,12 +61,170 @@ This package syncs **Google Tasks only** — not Google Calendar events. If you 
 
 ## Install
 
-Until this package lands on MELPA, clone the repo and `load` it manually:
+### With Nix flakes + Home Manager (recommended)
+
+The flake exposes three outputs:
+
+- `overlays.default` — extends `pkgs.emacsPackages` with `org-mode-google-tasks-sync`.
+- `homeManagerModules.default` — a Home Manager module that installs the package and writes the Emacs config for you.
+- `packages.<system>.default` — the byte-compiled Emacs package, if you'd rather wire it up manually.
+
+#### Step 1 — Add the flake to your inputs
+
+```nix
+# flake.nix (your dotfiles repo)
+{
+  inputs.org-mode-google-tasks-sync = {
+    url = "github:afwlehmann/org-mode-google-tasks-sync";
+    inputs.nixpkgs.follows = "nixpkgs";   # pin to your nixpkgs revision
+  };
+}
+```
+
+#### Step 2 — Apply the overlay and import the module
+
+```nix
+# home.nix (or wherever your Home Manager config lives)
+{ inputs, ... }:
+{
+  nixpkgs.overlays = [ inputs.org-mode-google-tasks-sync.overlays.default ];
+  imports = [ inputs.org-mode-google-tasks-sync.homeManagerModules.default ];
+}
+```
+
+#### Step 3 — Configure the module
+
+```nix
+programs.org-mode-google-tasks-sync = {
+  enable = true;
+
+  map = {
+    "MTYxOTU..." = { file = "~/org/work.org";     parentHeading = "Tasks"; };
+    "MTk0NDg..." = { file = "~/org/personal.org"; parentHeading = "Inbox"; };
+  };
+
+  pollInterval = 300;            # incremental sync every 5 min
+  fullSyncInterval = 86400;      # full reconciliation once a day
+};
+```
+
+This installs the package into `programs.emacs`, sets `org-mode-google-tasks-sync-map`, the two intervals, and enables `org-mode-google-tasks-sync-mode` automatically.
+
+#### Step 4 — Choose how to provide the static OAuth credentials
+
+Emacs accesses every secret through `auth-source`.  The dynamic `refresh_token` always lives in `~/.authinfo.gpg` (writable, encrypted at rest by GPG, written automatically when you run `M-x org-mode-google-tasks-sync-authorize`).  The only choice is how the *static* pair (`client_id`, `client_secret`) gets there:
+
+##### Option A — Interactive (simplest, no Nix coupling)
+
+Leave `clientId` and `clientSecretFile` unset in the HM module.  After activation, run once:
+
+```
+M-x org-mode-google-tasks-sync-configure   ;; prompts for client_id and client_secret
+M-x org-mode-google-tasks-sync-authorize    ;; OAuth dance; writes refresh_token
+```
+
+Done.  All three secrets land in `~/.authinfo.gpg`.  Works identically to a non-Nix setup.
+
+##### Option B — Declarative via secret manager (sops-nix, agenix, …)
+
+Pass `clientId` (string — semi-public; safe in the Nix store) and `clientSecretFile` (path to a runtime file produced by your secret manager).  At activation the module writes/updates `$XDG_DATA_HOME/org-mode-google-tasks-sync/credentials.authinfo` (chmod 0600) with the two static netrc lines and prepends it to Emacs's `auth-sources`.  The module also points the package's `org-mode-google-tasks-sync-oauth-write-target` at the same file, so the `refresh_token` acquired by `M-x org-mode-google-tasks-sync-authorize` lands there too.
+
+**All three secrets in one file**, fully owned by the HM module.  `~/.authinfo.gpg` is never touched.  Subsequent `home-manager switch` invocations preserve the `refresh_token` line and only replace the `client_id` / `client_secret` lines.
+
+Example with **sops-nix**:
+
+```nix
+sops.secrets.org-mode-google-tasks-sync-client-secret = {
+  sopsFile = ./secrets.yaml;
+};
+
+programs.org-mode-google-tasks-sync = {
+  enable = true;
+  clientId = "1234567890-abcdef.apps.googleusercontent.com";
+  clientSecretFile = config.sops.secrets.org-mode-google-tasks-sync-client-secret.path;
+  map = { /* ... */ };
+};
+```
+
+`secrets.yaml` (sops-encrypted) is just the secret value:
+
+```yaml
+org-mode-google-tasks-sync-client-secret: GOCSPX-xxxxxxxxxxxxxxxxxxxx
+```
+
+After rebuild, run `M-x org-mode-google-tasks-sync-authorize` once.  You don't need `M-x org-mode-google-tasks-sync-configure`.
+
+**Caveat:** the credentials file is plaintext on disk (chmod 600).  Disk encryption (FileVault, LUKS, etc.) is your at-rest protection.  All three secrets — `client_id`, `client_secret`, and `refresh_token` — live in this file under Option B.  If you want stronger at-rest encryption, use Option A and let Emacs write to `~/.authinfo.gpg`.
+
+**Other secret managers** work the same way — `clientSecretFile` is just a path:
+
+<details><summary><strong>agenix</strong></summary>
+
+```nix
+age.secrets.org-mode-google-tasks-sync-client-secret.file =
+  ./secrets/client-secret.age;
+
+programs.org-mode-google-tasks-sync.clientSecretFile =
+  config.age.secrets.org-mode-google-tasks-sync-client-secret.path;
+```
+</details>
+
+<details><summary><strong>Hand-managed file (testing only)</strong></summary>
+
+```nix
+home.file.".config/org-mode-google-tasks-sync/client-secret" = {
+  source = ./local-secrets/client-secret;   # plaintext, not committed; chmod 600
+};
+
+programs.org-mode-google-tasks-sync.clientSecretFile =
+  "${config.home.homeDirectory}/.config/org-mode-google-tasks-sync/client-secret";
+```
+</details>
+
+#### All module options
+
+| Option | Type | Default | Purpose |
+|---|---|---|---|
+| `enable` | bool | `false` | Master switch. |
+| `package` | package | `pkgs.emacsPackages.org-mode-google-tasks-sync` | Override to pin a specific revision or substitute a fork. |
+| `clientId` | nullable string | `null` | OAuth client ID.  When set together with `clientSecretFile`, the module writes the pair to a chmod-0600 file under `$XDG_DATA_HOME` and adds it to `auth-sources`.  Null = use `M-x ...-configure` instead. |
+| `clientSecretFile` | nullable path | `null` | Runtime path to a file containing the client secret.  Read at activation.  Must be set together with `clientId`. |
+| `map` | attrset of `{ file, parentHeading }` | `{}` | Google Tasks list ID → org file + parent heading. |
+| `pollInterval` | positive int | `300` | Seconds between incremental sync ticks. |
+| `fullSyncInterval` | positive int | `86400` | Seconds between full reconciliation passes. |
+| `autoEnableMode` | bool | `true` | Whether to call `(org-mode-google-tasks-sync-mode 1)` automatically.  Disable to start sync manually. |
+| `extraConfig` | lines | `""` | Extra Elisp appended after the generated config. |
+
+### Just the package (no Home Manager)
+
+If you don't use the Home Manager module — say, you assemble your Emacs differently — apply the overlay and reach for `epkgs.org-mode-google-tasks-sync`:
+
+```nix
+nixpkgs.overlays = [ inputs.org-mode-google-tasks-sync.overlays.default ];
+programs.emacs.extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
+```
+
+Or grab a ready-to-run Emacs:
+
+```sh
+nix run github:afwlehmann/org-mode-google-tasks-sync#emacs
+```
+
+For development:
+
+```sh
+nix develop                       # shell with Emacs + plz + oauth2
+nix flake check                   # runs the ert suite in a sandbox
+```
+
+### Manual install (without Nix)
+
+Clone the repo and `load` it manually:
 
 ```elisp
 ;; in your init.el
 (add-to-list 'load-path "~/src/git/org-mode-google-tasks-sync")
-(require 'org-mode-google-tasks)
+(require 'org-mode-google-tasks-sync)
 ```
 
 Install dependencies from MELPA if you haven't:
@@ -81,21 +238,21 @@ M-x package-install RET oauth2 RET
 
 ## Configuration
 
-This section describes **every** user-facing variable and command. All variables live in the `org-mode-google-tasks` customization group; `M-x customize-group RET org-mode-google-tasks RET` works for any of them.
+This section describes **every** user-facing variable and command. All variables live in the `org-mode-google-tasks-sync` customization group; `M-x customize-group RET org-mode-google-tasks-sync RET` works for any of them.
 
 ### Step 1 — Store OAuth credentials
 
 Run the interactive configuration command:
 
 ```
-M-x org-mode-google-tasks-configure
+M-x org-mode-google-tasks-sync-configure
 ```
 
 You'll be prompted for `client_id` and `client_secret` from the Cloud Console. Both are stored in `~/.authinfo.gpg` via `auth-source` under these entries:
 
 ```
-machine api.google.com login org-mode-google-tasks-client-id      password <your-id>.apps.googleusercontent.com
-machine api.google.com login org-mode-google-tasks-client-secret  password GOCSPX-...
+machine api.google.com login org-mode-google-tasks-sync-client-id      password <your-id>.apps.googleusercontent.com
+machine api.google.com login org-mode-google-tasks-sync-client-secret  password GOCSPX-...
 ```
 
 You can also write those lines directly into `~/.authinfo.gpg` with any text editor (Emacs will decrypt and re-encrypt transparently via EasyPG).
@@ -103,7 +260,7 @@ You can also write those lines directly into `~/.authinfo.gpg` with any text edi
 ### Step 2 — Authorize
 
 ```
-M-x org-mode-google-tasks-authorize
+M-x org-mode-google-tasks-sync-authorize
 ```
 
 This:
@@ -113,7 +270,7 @@ This:
 4. After you click "Allow", Google redirects to the local server, the code is exchanged for tokens, and the **refresh token** is appended to `~/.authinfo.gpg`:
 
    ```
-   machine api.google.com login org-mode-google-tasks-refresh-token  password 1//0g...
+   machine api.google.com login org-mode-google-tasks-sync-refresh-token  password 1//0g...
    ```
 
 The first time you'll see a "Google hasn't verified this app" warning. Click **Advanced → Continue** — this is expected for an unverified single-user app.
@@ -121,7 +278,7 @@ The first time you'll see a "Google hasn't verified this app" warning. Click **A
 ### Step 3 — Discover your task lists
 
 ```
-M-x org-mode-google-tasks-list-discover
+M-x org-mode-google-tasks-sync-list-discover
 ```
 
 This fetches your task lists from Google and opens a `*Google Tasks Lists*` buffer showing each list's **ID** and **title**. Copy the IDs you want to sync.
@@ -130,7 +287,7 @@ This fetches your task lists from Google and opens a `*Google Tasks Lists*` buff
 
 ```elisp
 ;; init.el
-(setq org-mode-google-tasks-map
+(setq org-mode-google-tasks-sync-map
       '(("MTYxOTU..."  . ("~/org/work.org"     . "Tasks"))
         ("MTk0NDg..."  . ("~/org/personal.org" . "Inbox"))))
 ```
@@ -159,12 +316,12 @@ Example file:
 
 ```elisp
 ;; init.el (after the setq above)
-(org-mode-google-tasks-mode 1)
+(org-mode-google-tasks-sync-mode 1)
 ```
 
 This installs:
-- A periodic timer that calls `org-mode-google-tasks-sync` every `org-mode-google-tasks-poll-interval` seconds.
-- A separate timer that calls `org-mode-google-tasks-full-sync` every `org-mode-google-tasks-full-sync-interval` seconds.
+- A periodic timer that calls `org-mode-google-tasks-sync` every `org-mode-google-tasks-sync-poll-interval` seconds.
+- A separate timer that calls `org-mode-google-tasks-sync-full-sync` every `org-mode-google-tasks-sync-full-sync-interval` seconds.
 - An `after-save-hook` that triggers an incremental sync ~1 second after you save any configured target file.
 
 ---
@@ -173,20 +330,20 @@ This installs:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `org-mode-google-tasks-map` | `nil` | Alist of `(LIST-ID . (FILE . PARENT-HEADING))` entries. See above. **Required** for sync to do anything. |
-| `org-mode-google-tasks-poll-interval` | `300` | Seconds between incremental sync ticks while the minor mode is on. |
-| `org-mode-google-tasks-full-sync-interval` | `86400` (1 day) | Seconds between full reconciliation passes. Full sync drops `updatedMin` and diffs Google's full ID set against local IDs to detect long-tombstoned deletions. |
+| `org-mode-google-tasks-sync-map` | `nil` | Alist of `(LIST-ID . (FILE . PARENT-HEADING))` entries. See above. **Required** for sync to do anything. |
+| `org-mode-google-tasks-sync-poll-interval` | `300` | Seconds between incremental sync ticks while the minor mode is on. |
+| `org-mode-google-tasks-sync-full-sync-interval` | `86400` (1 day) | Seconds between full reconciliation passes. Full sync drops `updatedMin` and diffs Google's full ID set against local IDs to detect long-tombstoned deletions. |
 
 ### What goes where
 
 | Data | Where it lives |
 |---|---|
 | `client_id`, `client_secret`, `refresh_token` | `~/.authinfo.gpg` via `auth-source` |
-| `org-mode-google-tasks-map`, polling intervals | Your `init.el` (or `customize`) |
+| `org-mode-google-tasks-sync-map`, polling intervals | Your `init.el` (or `customize`) |
 | Per-task ID, ETag, server `updated`, content hash | `:PROPERTIES:` drawer of each synced heading |
 | Per-file last incremental sync timestamp | `#+GTASKS_LAST_SYNC:` keyword at top of file |
 | Per-file last full sync timestamp | `#+GTASKS_LAST_FULL_SYNC:` keyword at top of file |
-| Action log | `*org-mode-google-tasks-log*` buffer (in-memory; survives until Emacs exits) |
+| Action log | `*org-mode-google-tasks-sync-log*` buffer (in-memory; survives until Emacs exits) |
 | Conflict quarantine | `*Google Tasks Conflicts*` buffer (in-memory; survives until Emacs exits) |
 
 Heading properties written by the package:
@@ -205,14 +362,14 @@ Heading properties written by the package:
 
 | Command | What it does |
 |---|---|
-| `org-mode-google-tasks-configure` | Prompt for client_id + client_secret; store in auth-source. Idempotent. |
-| `org-mode-google-tasks-authorize` | Run the OAuth consent flow; store refresh_token in auth-source. |
-| `org-mode-google-tasks-list-discover` | List your Google task lists with their IDs in a buffer. |
+| `org-mode-google-tasks-sync-configure` | Prompt for client_id + client_secret; store in auth-source. Idempotent. |
+| `org-mode-google-tasks-sync-authorize` | Run the OAuth consent flow; store refresh_token in auth-source. |
+| `org-mode-google-tasks-sync-list-discover` | List your Google task lists with their IDs in a buffer. |
 | `org-mode-google-tasks-sync` | Run one incremental sync pass right now. |
-| `org-mode-google-tasks-full-sync` | Run a full reconciliation now (detects old tombstones). |
-| `org-mode-google-tasks-show-log` | Pop to the action log buffer. |
-| `org-mode-google-tasks-show-conflicts` | Pop to the conflict quarantine buffer. |
-| `org-mode-google-tasks-mode` | Global minor mode. Toggle on to install the sync timer and save hook. |
+| `org-mode-google-tasks-sync-full-sync` | Run a full reconciliation now (detects old tombstones). |
+| `org-mode-google-tasks-sync-show-log` | Pop to the action log buffer. |
+| `org-mode-google-tasks-sync-show-conflicts` | Pop to the conflict quarantine buffer. |
+| `org-mode-google-tasks-sync-mode` | Global minor mode. Toggle on to install the sync timer and save hook. |
 
 ---
 
@@ -234,42 +391,42 @@ The package computes two booleans per task:
 ### Deletion (auto-delete in both directions, no confirmation)
 
 - **Remote → local**: a `deleted: true` tombstone (returned within Google's ~30-day retention) → the local heading is removed immediately.
-- **Remote → local, old tombstones**: a full sync (daily, or `M-x org-mode-google-tasks-full-sync`) fetches the live ID set and removes any locally-stored ID no longer present.
+- **Remote → local, old tombstones**: a full sync (daily, or `M-x org-mode-google-tasks-sync-full-sync`) fetches the live ID set and removes any locally-stored ID no longer present.
 - **Local → remote**: a heading removed from the synced subtree (or archived out of it) is `DELETE`d from Google on the next tick.
 
-Every delete is logged to `*org-mode-google-tasks-log*` with the title and timestamp, so accidental losses are visible.
+Every delete is logged to `*org-mode-google-tasks-sync-log*` with the title and timestamp, so accidental losses are visible.
 
 ---
 
 ## Troubleshooting
 
-### "Run `M-x org-mode-google-tasks-configure' first"
-The package couldn't find your client_id or client_secret in auth-source. Run `M-x org-mode-google-tasks-configure` and check that `~/.authinfo.gpg` decrypts (it should prompt for your GPG passphrase the first time per session).
+### "Run `M-x org-mode-google-tasks-sync-configure' first"
+The package couldn't find your client_id or client_secret in auth-source. Run `M-x org-mode-google-tasks-sync-configure` and check that `~/.authinfo.gpg` decrypts (it should prompt for your GPG passphrase the first time per session).
 
 ### Browser shows "Google hasn't verified this app"
 Expected for an unverified personal app. Click **Advanced → Continue** to proceed. This warning only appears during the initial consent; subsequent token refreshes are silent.
 
 ### Sync seems to do nothing
-- Check `org-mode-google-tasks-map` has entries.
+- Check `org-mode-google-tasks-sync-map` has entries.
 - Check the parent heading text **exactly** matches the heading in the file (case-sensitive).
-- Pop to `*org-mode-google-tasks-log*` to see what happened during the last tick.
+- Pop to `*org-mode-google-tasks-sync-log*` to see what happened during the last tick.
 
 ### Refresh token expired / invalid
-Run `M-x org-mode-google-tasks-authorize` again. The new refresh_token will overwrite the stale one in auth-source.
+Run `M-x org-mode-google-tasks-sync-authorize` again. The new refresh_token will overwrite the stale one in auth-source.
 
 ### GPG keeps prompting for the passphrase
 Configure `gpg-agent` with `pinentry-mac` (or `pinentry-curses` on Linux). The passphrase will be cached for hours and prompts become rare. See https://gnupg.org/documentation/manuals/gnupg/Agent-Configuration.html.
 
 ### Port conflict on the OAuth loopback redirect
-The loopback server uses a kernel-assigned port (`:service t` in `make-network-process`), so there shouldn't be conflicts. If `M-x org-mode-google-tasks-authorize` fails to bind, restart Emacs.
+The loopback server uses a kernel-assigned port (`:service t` in `make-network-process`), so there shouldn't be conflicts. If `M-x org-mode-google-tasks-sync-authorize` fails to bind, restart Emacs.
 
 ### Rate limits
 Google Tasks API has generous limits (~50k requests/day per project). If you hit a 429, the package backs off exponentially (1s → 60s cap). All rate-limit events are logged.
 
 ### How do I revoke / re-authorize?
 1. Visit https://myaccount.google.com/permissions, find the app, click "Remove access".
-2. Delete the `org-mode-google-tasks-refresh-token` line from `~/.authinfo.gpg`.
-3. Run `M-x org-mode-google-tasks-authorize` again to issue a fresh token.
+2. Delete the `org-mode-google-tasks-sync-refresh-token` line from `~/.authinfo.gpg`.
+3. Run `M-x org-mode-google-tasks-sync-authorize` again to issue a fresh token.
 
 ---
 
