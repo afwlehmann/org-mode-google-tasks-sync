@@ -53,6 +53,18 @@
         apps.emacs = {
           type = "app";
           program = "${emacsWithPackage}/bin/emacs";
+          meta.description = "Emacs preloaded with org-mode-google-tasks-sync";
+        };
+
+        apps.bootstrap = {
+          type = "app";
+          program = "${pkgs.writeShellScript "org-mode-google-tasks-sync-bootstrap" ''
+            exec ${emacsWithPackage}/bin/emacs --batch \
+              -l org-mode-google-tasks-sync \
+              -f org-mode-google-tasks-sync-bootstrap
+          ''}";
+          meta.description =
+            "Interactive OAuth bootstrap: prompts for client_id and client_secret, captures the consent redirect, and prints the refresh token plus Google Tasks list IDs.";
         };
 
         devShells.default = pkgs.mkShell {

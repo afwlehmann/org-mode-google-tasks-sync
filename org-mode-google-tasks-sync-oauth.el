@@ -155,8 +155,11 @@ attempt to write to a read-only static-credentials file managed externally."
                       (cl-loop repeat 16 collect (random 256)))))
     (base64-encode-string bytes t)))
 
-(defun org-mode-google-tasks-sync-oauth-authorize ()
-  "Run the OAuth authorization flow and persist the refresh token."
+(defun org-mode-google-tasks-sync-oauth-authorize (&optional on-success)
+  "Run the OAuth authorization flow and persist the refresh token.
+ON-SUCCESS, if non-nil, is invoked with no arguments after the refresh
+token has been saved.  Used by `org-mode-google-tasks-sync-setup' to
+chain into `org-mode-google-tasks-sync-list-discover'."
   (interactive)
   (let ((client-id (org-mode-google-tasks-sync-oauth--read-secret
                     org-mode-google-tasks-sync-oauth--login-client-id))
@@ -169,7 +172,7 @@ attempt to write to a read-only static-credentials file managed externally."
     (org-mode-google-tasks-sync-oauth--start-loopback
      (lambda (code)
        (org-mode-google-tasks-sync-oauth--exchange-code
-        client-id client-secret code)))
+        client-id client-secret code on-success)))
     (let* ((port org-mode-google-tasks-sync-oauth--server-port)
            (redirect (format "http://127.0.0.1:%d/" port))
            (url (concat
@@ -185,8 +188,9 @@ attempt to write to a read-only static-credentials file managed externally."
       (browse-url url)
       (message "Browser opened.  Complete consent in your browser..."))))
 
-(defun org-mode-google-tasks-sync-oauth--exchange-code (client-id client-secret code)
-  "Exchange CODE for tokens.  Persist refresh_token in auth-source."
+(defun org-mode-google-tasks-sync-oauth--exchange-code (client-id client-secret code &optional on-success)
+  "Exchange CODE for tokens.  Persist refresh_token in auth-source.
+ON-SUCCESS, if non-nil, is funcalled after the refresh token has been saved."
   (let* ((redirect (format "http://127.0.0.1:%d/"
                            org-mode-google-tasks-sync-oauth--server-port))
          (body (concat
@@ -207,7 +211,9 @@ attempt to write to a read-only static-credentials file managed externally."
                 (when refresh
                   (org-mode-google-tasks-sync-oauth--save-secret
                    org-mode-google-tasks-sync-oauth--login-refresh-token refresh)
-                  (message "Authorized.  Refresh token stored in ~/.authinfo.gpg"))))
+                  (message "Authorized.  Refresh token stored.")
+                  (when (functionp on-success)
+                    (run-at-time 0.1 nil on-success)))))
       :else (lambda (err)
               (message "Token exchange failed: %S" err)))))
 

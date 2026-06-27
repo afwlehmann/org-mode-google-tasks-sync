@@ -52,6 +52,22 @@ Sync touches only direct children under PARENT-HEADING in FILE."
   "Timer object for the periodic full reconciliation pass.")
 
 ;;;###autoload
+(defun org-mode-google-tasks-sync-setup ()
+  "One-shot interactive setup — the single command most users want.
+Prompts for `client_id' and `client_secret', runs the OAuth consent
+flow, and then opens a buffer listing your Google Tasks list IDs so
+you can populate `org-mode-google-tasks-sync-map'.
+
+The individual steps are still exposed as
+`org-mode-google-tasks-sync-configure', `-authorize', and
+`-list-discover' for re-running phases on their own (e.g.
+re-authorizing after a token revocation)."
+  (interactive)
+  (org-mode-google-tasks-sync-oauth-configure)
+  (org-mode-google-tasks-sync-oauth-authorize
+   #'org-mode-google-tasks-sync-engine-discover-lists))
+
+;;;###autoload
 (defun org-mode-google-tasks-sync-configure ()
   "Interactively store client_id and client_secret in `auth-source'."
   (interactive)
@@ -92,6 +108,44 @@ Sync touches only direct children under PARENT-HEADING in FILE."
   "Pop to the conflict quarantine buffer."
   (interactive)
   (pop-to-buffer (org-mode-google-tasks-sync-engine-conflicts-buffer)))
+
+;;;###autoload
+(defun org-mode-google-tasks-sync-bootstrap ()
+  "End-to-end bootstrap.  Designed for `emacs --batch'.
+
+Reuses `org-mode-google-tasks-sync-configure' (prompts for client_id
+and client_secret, stores them in auth-source) and `-authorize' (runs
+the OAuth dance, saves the refresh token), then prints `refresh_token'
+and your list IDs to stdout for use in a SOPS/Home-Manager config.
+
+Typical invocation:
+
+  nix run github:afwlehmann/org-mode-google-tasks-sync#bootstrap
+
+The result lands in `~/.authinfo.gpg' (so a non-Nix user can stop
+here) and is also echoed to stdout for Nix users who'd rather copy
+the secrets into SOPS.  Exits non-zero on timeout (5 minutes)."
+  (let ((done nil))
+    (call-interactively #'org-mode-google-tasks-sync-configure)
+    (org-mode-google-tasks-sync-oauth-authorize
+     (lambda () (setq done t)))
+    (let ((deadline (+ (float-time) 300)))
+      (while (and (not done) (< (float-time) deadline))
+        (accept-process-output nil 1)))
+    (unless done
+      (message "Timed out waiting for OAuth callback.")
+      (kill-emacs 1)))
+  (princ "\n--- Bootstrap complete ---\n")
+  (princ "Copy these into SOPS (or your secret manager) if you want a declarative Home Manager setup:\n\n")
+  (princ (format "client_id=%s\n"
+                 (org-mode-google-tasks-sync-oauth--read-secret
+                  org-mode-google-tasks-sync-oauth--login-client-id)))
+  (princ (format "client_secret=<the value you just entered>\n"))
+  (princ (format "refresh_token=%s\n"
+                 (org-mode-google-tasks-sync-oauth--read-secret
+                  org-mode-google-tasks-sync-oauth--login-refresh-token)))
+  (princ "\n--- Google Tasks lists (use these IDs in `map') ---\n")
+  (org-mode-google-tasks-sync-engine-discover-lists-batch))
 
 (defun org-mode-google-tasks-sync--after-save-hook ()
   "If the saved file is a configured sync target, schedule a sync soon."

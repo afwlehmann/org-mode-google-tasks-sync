@@ -358,5 +358,25 @@ LOCAL-MTIME is float-time; REMOTE-UPDATED is RFC3339 string."
      (lambda (err)
        (message "Could not fetch lists: %S" err)))))
 
+;;;###autoload
+(defun org-mode-google-tasks-sync-engine-discover-lists-batch ()
+  "Print task lists to stdout as `ID<TAB>TITLE' lines.
+Designed for `emacs --batch'.  Requires a refresh token already stored
+in auth-source (run `M-x org-mode-google-tasks-sync-authorize'
+interactively at least once first).  Performs the HTTPS call
+synchronously so the output is complete before Emacs exits."
+  (let* ((token (org-mode-google-tasks-sync-engine--token))
+         (body (plz 'get
+                 (concat org-mode-google-tasks-sync-api--base-url
+                         "/users/@me/lists")
+                 :headers (org-mode-google-tasks-sync-api--auth-header token)
+                 :as 'string))
+         (lists (alist-get 'items
+                           (org-mode-google-tasks-sync-api--parse-json body))))
+    (dolist (l (append lists nil))
+      (princ (format "%s\t%s\n"
+                     (alist-get 'id l)
+                     (alist-get 'title l))))))
+
 (provide 'org-mode-google-tasks-sync-engine)
 ;;; org-mode-google-tasks-sync-engine.el ends here

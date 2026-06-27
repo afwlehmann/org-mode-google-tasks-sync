@@ -203,7 +203,14 @@ in
         }
       ];
 
+      # Ensure all the runtime prerequisites are present.  `programs.emacs`
+      # is enabled by default; the user can override with mkForce or by
+      # declaring their own Emacs setup elsewhere.  GnuPG is needed in PATH
+      # for Emacs's EasyPG to read/write `.gpg` auth-source files.  plz and
+      # oauth2 flow in automatically via the package's `packageRequires`.
+      programs.emacs.enable = lib.mkDefault true;
       programs.emacs.extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
+      home.packages = [ pkgs.gnupg ];
 
       programs.emacs.extraConfig = lib.mkAfter ''
         ;; --- org-mode-google-tasks-sync (managed by Home Manager) ---
