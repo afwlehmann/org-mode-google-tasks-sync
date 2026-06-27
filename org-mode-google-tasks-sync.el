@@ -35,7 +35,7 @@ Sync touches only direct children under PARENT-HEADING in FILE."
                 :value-type (cons file string))
   :group 'org-mode-google-tasks-sync)
 
-(defcustom org-mode-google-tasks-sync-tick-interval 30
+(defcustom org-mode-google-tasks-sync-tick-interval 60
   "Seconds between wake-up checks while `org-mode-google-tasks-sync-mode' is on.
 Each tick runs a cheap predicate (no network) that decides whether a
 full sync is due — see `org-mode-google-tasks-sync--should-sync-p'.

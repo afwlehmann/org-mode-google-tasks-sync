@@ -171,7 +171,10 @@ LOCAL-MTIME is float-time; REMOTE-UPDATED is RFC3339 string."
       (setq org-mode-google-tasks-sync-engine--state 'fetching)
       (setq org-mode-google-tasks-sync-engine--last-sync-time (float-time))
       (org-mode-google-tasks-sync-engine--arm-timeout)
-      (org-mode-google-tasks-sync-engine--log "Begin %s sync" mode)
+      ;; We don't log "Begin sync" here — most ticks finish with no actual
+      ;; pull/push activity, and a per-cycle "begin"/"complete" pair drowns
+      ;; the log.  Per-action lines below (Pushed, Pulled, Deleted, …) are
+      ;; the actual signal.
       (org-mode-google-tasks-sync-engine--sync-next entries token mode)))))
 
 (defun org-mode-google-tasks-sync-engine--arm-timeout ()
@@ -210,8 +213,7 @@ state machine because state has already moved back to `idle'."
         ;; predicate sees mtime <= last-sync-time on the next round
         ;; and doesn't re-fire on our own writes.
         (setq org-mode-google-tasks-sync-engine--last-sync-time (float-time))
-        (org-mode-google-tasks-sync-engine--cancel-timeout)
-        (org-mode-google-tasks-sync-engine--log "Sync complete"))
+        (org-mode-google-tasks-sync-engine--cancel-timeout))
     (let* ((entry (car entries))
            (list-id (car entry))
            (file (car (cdr entry)))

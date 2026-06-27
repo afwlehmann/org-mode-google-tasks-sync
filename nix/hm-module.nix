@@ -155,7 +155,7 @@ in
 
     tickInterval = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 30;
+      default = 60;
       description = ''
         Seconds between cheap wake-up checks.  Each tick checks the
         mtimes of the configured org files and triggers a sync only
