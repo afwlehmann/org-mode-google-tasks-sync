@@ -12,13 +12,13 @@ The most common cause on macOS is **GUI Emacs being launched with a stripped PAT
 M-: (executable-find "gpg") RET
 ```
 
-If that returns `nil`, the rest of this section applies.  Three options, pick whichever fits your setup:
+If that returns `nil`, EasyPG can't find a gpg binary on `exec-path` — the GUI Emacs PATH problem on macOS.  Two options, pick whichever fits your setup:
 
-1. **Pin the gpg path explicitly** (works for any Emacs).  Add to `init.el`:
+1. **Add the binary's directory to `exec-path` explicitly.**  Pick the path returned by `which gpg` in a shell that *can* find it (Homebrew: `/opt/homebrew/bin/gpg` on Apple Silicon, `/usr/local/bin/gpg` on Intel; Nix/Home Manager: usually `/etc/profiles/per-user/$USER/bin/gpg` or directly under `/nix/store/.../bin/gpg`).  Then in `init.el`:
    ```elisp
-   (setq epg-gpg-program "/path/to/gpg")
+   (add-to-list 'exec-path "/etc/profiles/per-user/alex/bin")
    ```
-   The path comes from `which gpg` in a shell that *can* find it.  On a Home Manager / Nix setup the gpg binary lives at something like `/etc/profiles/per-user/$USER/bin/gpg` or directly under the Nix store; on Homebrew it's `/opt/homebrew/bin/gpg` (Apple Silicon) or `/usr/local/bin/gpg` (Intel).
+   `exec-path` is a list of directories, not a list of program paths — point at the directory containing `gpg`.
 
 2. **Use [`exec-path-from-shell`](https://github.com/purcell/exec-path-from-shell)** so Emacs inherits your shell's `PATH` at startup.  Add to `init.el`:
    ```elisp
@@ -26,11 +26,22 @@ If that returns `nil`, the rest of this section applies.  Three options, pick wh
      :if (memq window-system '(mac ns))
      :config (exec-path-from-shell-initialize))
    ```
-   This fixes a much wider class of "GUI Emacs can't find a CLI tool" problems.
+   Fixes a much wider class of "GUI Emacs can't find a CLI tool" problems.
 
-3. **Make sure `gpg` is installed at all.**  `brew install gnupg` on macOS, your distro's `gnupg` package on Linux.  Nix/HM users already get it via the module's `home.packages` — but that puts it on the shell PATH, which doesn't help GUI Emacs without one of the two fixes above.
+After applying either, restart Emacs (or toggle `org-mode-google-tasks-sync-mode` off and on) so the next tick re-probes.
 
-After applying any of these, restart Emacs (or toggle `org-mode-google-tasks-sync-mode` off and on) so the timer picks up the fix.
+### What *doesn't* work: pinning `epg-gpg-program`
+
+You'll find advice online (and in older versions of this file) suggesting `(setq epg-gpg-program "/path/to/gpg")`.  Don't bother — in modern Emacs (≥27) this only sets the **default value** that gets baked into `epg-config--program-alist` at load time.  The actual dispatcher, `epg-find-configuration`, walks the program *names* (`"gpg2"`, `"gpg"`) with `executable-find` against your live `exec-path`, ignoring the variable.  In the common case the override appears to work only because `(executable-find "gpg")` happens to return the same path you set anyway.  When they diverge — as with a Nix-store path while `exec-path` excludes the dir — only `exec-path` wins.
+
+Diagnose by running both:
+
+```elisp
+M-: epg-gpg-program RET                 ; whatever you set
+M-: (executable-find "gpg") RET         ; what the dispatcher actually finds
+```
+
+If those don't agree, `executable-find` is the one to fix.
 
 ## Sync runs but nothing changes
 
