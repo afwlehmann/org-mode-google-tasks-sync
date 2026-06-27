@@ -224,9 +224,23 @@ state machine because state has already moved back to `idle'."
 
 (defun org-mode-google-tasks-sync-engine--sync-one (token list-id file parent mode done)
   "Sync one list end-to-end, calling DONE when finished."
-  (let ((args (if (eq mode 'full) '()
-                (let ((since (org-mode-google-tasks-sync-engine--last-sync file)))
-                  (when since `(("updatedMin" . ,since)))))))
+  (let* ((parent-exists-p
+          (with-current-buffer (find-file-noselect file)
+            (save-excursion
+              (goto-char (point-min))
+              (re-search-forward
+               (format "^\\*+ %s$" (regexp-quote parent)) nil t))))
+         ;; Drop `updatedMin' when the parent heading is missing.  If a prior
+         ;; sync wrote `#+GTASKS_LAST_SYNC' to the file but had nowhere to
+         ;; insert the pulled tasks (e.g. parent absent), that stale timestamp
+         ;; would otherwise make every subsequent incremental sync ask Google
+         ;; for "changes since then" and get nothing — exactly the case where
+         ;; the user sees a populated keyword but no tasks.  Treating the
+         ;; "no parent" branch as a full sync recovers automatically.
+         (args (if (or (eq mode 'full) (not parent-exists-p))
+                   '()
+                 (let ((since (org-mode-google-tasks-sync-engine--last-sync file)))
+                   (when since `(("updatedMin" . ,since)))))))
     (org-mode-google-tasks-sync-api-list-tasks
      token list-id args
      (lambda (remote-tasks)
