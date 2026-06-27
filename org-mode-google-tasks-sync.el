@@ -35,8 +35,21 @@ Sync touches only direct children under PARENT-HEADING in FILE."
                 :value-type (cons file string))
   :group 'org-mode-google-tasks-sync)
 
+(defcustom org-mode-google-tasks-sync-tick-interval 30
+  "Seconds between wake-up checks while `org-mode-google-tasks-sync-mode' is on.
+Each tick runs a cheap predicate (no network) that decides whether a
+full sync is due — see `org-mode-google-tasks-sync--should-sync-p'.
+Lower values make sync more responsive to external file edits; higher
+values reduce wake-up overhead."
+  :type 'integer
+  :group 'org-mode-google-tasks-sync)
+
 (defcustom org-mode-google-tasks-sync-poll-interval 300
-  "Seconds between background sync ticks while `org-mode-google-tasks-sync-mode' is on."
+  "Maximum seconds between syncs.
+Acts as a safety net so Google-side changes get pulled even when no
+local file has been modified.  When the tick predicate sees that this
+many seconds have passed since the last successful sync, it triggers
+one regardless of file mtimes."
   :type 'integer
   :group 'org-mode-google-tasks-sync)
 
@@ -50,6 +63,9 @@ Sync touches only direct children under PARENT-HEADING in FILE."
 
 (defvar org-mode-google-tasks-sync--full-timer nil
   "Timer object for the periodic full reconciliation pass.")
+
+(defvar org-mode-google-tasks-sync--last-sync-time nil
+  "`float-time' of the last successful sync, or nil if none yet this session.")
 
 ;;;###autoload
 (defun org-mode-google-tasks-sync-setup ()
@@ -89,6 +105,7 @@ re-authorizing after a token revocation)."
 (defun org-mode-google-tasks-sync ()
   "Run one incremental sync pass for every configured list."
   (interactive)
+  (setq org-mode-google-tasks-sync--last-sync-time (float-time))
   (org-mode-google-tasks-sync-engine-run 'incremental))
 
 ;;;###autoload
@@ -109,6 +126,27 @@ re-authorizing after a token revocation)."
   (interactive)
   (pop-to-buffer (org-mode-google-tasks-sync-engine-conflicts-buffer)))
 
+(defun org-mode-google-tasks-sync--detect-hm-bridge ()
+  "Point writes at the HM bridge's XDG files when they exist.
+The Home Manager module materializes
+`$XDG_DATA_HOME/org-mode-google-tasks-sync/static-creds.authinfo.gpg' on
+activation.  If that file is present the bootstrap is running in an
+HM-managed environment, so secrets it writes (notably the refresh
+token) should land alongside the HM-managed file rather than in
+`~/.authinfo.gpg' where the user's interactive Emacs won't read them
+first.  No-op when the file is absent."
+  (let* ((xdg (or (getenv "XDG_DATA_HOME")
+                  (expand-file-name "~/.local/share")))
+         (dir (expand-file-name "org-mode-google-tasks-sync" xdg))
+         (static-creds (expand-file-name "static-creds.authinfo.gpg" dir))
+         (dynamic-creds (expand-file-name "dynamic-creds.authinfo.gpg" dir)))
+    (when (file-exists-p static-creds)
+      (require 'auth-source)
+      (add-to-list 'auth-sources static-creds)
+      (add-to-list 'auth-sources dynamic-creds)
+      (setq org-mode-google-tasks-sync-oauth-write-target dynamic-creds)
+      (message "Home Manager bridge detected; writing to %s" dynamic-creds))))
+
 ;;;###autoload
 (defun org-mode-google-tasks-sync-bootstrap ()
   "End-to-end bootstrap.  Designed for `emacs --batch'.
@@ -122,9 +160,16 @@ Typical invocation:
 
   nix run github:afwlehmann/org-mode-google-tasks-sync#bootstrap
 
-The result lands in `~/.authinfo.gpg' (so a non-Nix user can stop
-here) and is also echoed to stdout for Nix users who'd rather copy
-the secrets into SOPS.  Exits non-zero on timeout (5 minutes)."
+By default the result lands in `~/.authinfo.gpg' (so a non-Nix user
+can stop here).  If the Home Manager bridge has already been activated
+on this machine (detected by the presence of
+`$XDG_DATA_HOME/org-mode-google-tasks-sync/static-creds.authinfo.gpg'),
+the bootstrap instead writes to that directory's
+`dynamic-creds.authinfo.gpg' so the secrets land where the
+HM-configured Emacs is going to look for them.  The values are also
+echoed to stdout for Nix users who'd rather copy them into SOPS.
+Exits non-zero on timeout (5 minutes)."
+  (org-mode-google-tasks-sync--detect-hm-bridge)
   (let ((done nil))
     (call-interactively #'org-mode-google-tasks-sync-configure)
     (org-mode-google-tasks-sync-oauth-authorize
@@ -171,16 +216,47 @@ the secrets into SOPS.  Exits non-zero on timeout (5 minutes)."
       (org-mode-google-tasks-sync--enable)
     (org-mode-google-tasks-sync--disable)))
 
+(defun org-mode-google-tasks-sync--any-file-modified-p ()
+  "Return non-nil if any configured org file's mtime is newer than the last sync.
+Returns t when no sync has happened yet this session, which makes the
+first tick fire a sync (so the user sees a sync within
+`org-mode-google-tasks-sync-tick-interval' seconds of starting Emacs)."
+  (or (null org-mode-google-tasks-sync--last-sync-time)
+      (cl-some
+       (lambda (entry)
+         (let* ((file (car (cdr entry)))
+                (attrs (and file (file-exists-p file) (file-attributes file))))
+           (when attrs
+             (> (float-time (file-attribute-modification-time attrs))
+                org-mode-google-tasks-sync--last-sync-time))))
+       org-mode-google-tasks-sync-map)))
+
+(defun org-mode-google-tasks-sync--should-sync-p ()
+  "Return non-nil if the tick should kick off a sync.
+True when: no sync has happened yet, or a configured file has been
+modified since the last sync, or the safety-net interval has elapsed."
+  (or (null org-mode-google-tasks-sync--last-sync-time)
+      (org-mode-google-tasks-sync--any-file-modified-p)
+      (> (- (float-time) org-mode-google-tasks-sync--last-sync-time)
+         org-mode-google-tasks-sync-poll-interval)))
+
+(defun org-mode-google-tasks-sync--tick ()
+  "Wake-up handler: sync iff the predicate says we should."
+  (when (org-mode-google-tasks-sync--should-sync-p)
+    (org-mode-google-tasks-sync)))
+
 (defun org-mode-google-tasks-sync--enable ()
   "Install timers and hooks."
   (when org-mode-google-tasks-sync--timer
     (cancel-timer org-mode-google-tasks-sync--timer))
   (when org-mode-google-tasks-sync--full-timer
     (cancel-timer org-mode-google-tasks-sync--full-timer))
+  (setq org-mode-google-tasks-sync--last-sync-time nil)
+  ;; First tick fires 1 s after enable so the user gets an immediate sync
+  ;; on Emacs start; subsequent ticks fire every `tick-interval'.
   (setq org-mode-google-tasks-sync--timer
-        (run-at-time org-mode-google-tasks-sync-poll-interval
-                     org-mode-google-tasks-sync-poll-interval
-                     #'org-mode-google-tasks-sync))
+        (run-at-time 1 org-mode-google-tasks-sync-tick-interval
+                     #'org-mode-google-tasks-sync--tick))
   (setq org-mode-google-tasks-sync--full-timer
         (run-at-time org-mode-google-tasks-sync-full-sync-interval
                      org-mode-google-tasks-sync-full-sync-interval

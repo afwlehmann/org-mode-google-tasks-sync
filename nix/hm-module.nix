@@ -153,10 +153,24 @@ in
       '';
     };
 
+    tickInterval = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 30;
+      description = ''
+        Seconds between cheap wake-up checks.  Each tick checks the
+        mtimes of the configured org files and triggers a sync only
+        when something changed — so external edits land in Google
+        within roughly this many seconds.
+      '';
+    };
+
     pollInterval = lib.mkOption {
       type = lib.types.ints.positive;
       default = 300;
-      description = "Seconds between incremental sync ticks.";
+      description = ''
+        Maximum seconds between syncs.  Safety net so Google-side
+        changes get pulled even when no local file has been modified.
+      '';
     };
 
     fullSyncInterval = lib.mkOption {
@@ -223,6 +237,7 @@ in
         ''}
         (setq org-mode-google-tasks-sync-map
               '(${mapAsElisp}))
+        (setq org-mode-google-tasks-sync-tick-interval ${toString cfg.tickInterval})
         (setq org-mode-google-tasks-sync-poll-interval ${toString cfg.pollInterval})
         (setq org-mode-google-tasks-sync-full-sync-interval ${toString cfg.fullSyncInterval})
         ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}

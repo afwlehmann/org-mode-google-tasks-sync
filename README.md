@@ -349,7 +349,8 @@ Then `M-x org-mode-google-tasks-sync-authorize` once (no `-configure` needed). F
 | `clientSecretFile` | nullable path | `null` | Runtime path to a file containing the client secret. |
 | `gpgRecipient` | nullable string | `null` | GPG key id/email used to encrypt the XDG credentials files. |
 | `map` | attrset of `{ file, parentHeading }` | `{}` | List ID → org file + parent heading. |
-| `pollInterval` | positive int | `300` | Seconds between incremental syncs. |
+| `tickInterval` | positive int | `30` | Seconds between cheap wake-up checks.  Each tick checks file mtimes and only syncs when something changed.  Determines how quickly external edits show up in Google. |
+| `pollInterval` | positive int | `300` | Maximum seconds between syncs — safety net so Google-side changes get pulled even when nothing local has changed. |
 | `fullSyncInterval` | positive int | `86400` | Seconds between full reconciliations. |
 | `autoEnableMode` | bool | `true` | Auto-start `org-mode-google-tasks-sync-mode`. |
 | `extraConfig` | lines | `""` | Extra Elisp appended to the generated config. |
