@@ -150,8 +150,10 @@ attempt to write to a read-only static-credentials file managed externally."
           (split-string query "&" t)))
 
 (defun org-mode-google-tasks-sync-oauth--gen-state ()
-  "Generate a random state nonce."
-  (let ((bytes (apply #'string
+  "Generate a random state nonce.
+Builds a unibyte string so `base64-encode-string' doesn't choke on bytes
+>= 128 (which `string' would otherwise treat as Unicode code points)."
+  (let ((bytes (apply #'unibyte-string
                       (cl-loop repeat 16 collect (random 256)))))
     (base64-encode-string bytes t)))
 

@@ -41,5 +41,21 @@
   (should (stringp org-mode-google-tasks-sync-oauth-write-target))
   (should (string-match-p "\\.authinfo" org-mode-google-tasks-sync-oauth-write-target)))
 
+(ert-deftest org-mode-google-tasks-sync-oauth-test/gen-state-base64-encodes-cleanly ()
+  "--gen-state must not crash on bytes >= 128.
+
+The implementation builds a unibyte buffer of 16 random bytes and
+base64-encodes it.  An earlier version used `string' instead of
+`unibyte-string', which interpreted bytes >= 128 as Unicode code
+points and made `base64-encode-string' signal
+\"Multibyte character in data for base64 encoding\" — breaking the
+bootstrap flow on its very first call.  This test exercises the path
+many times to be confident we hit the >= 128 range."
+  (dotimes (_ 50)
+    (let ((state (org-mode-google-tasks-sync-oauth--gen-state)))
+      (should (stringp state))
+      (should (> (length state) 0))
+      (should (string-match-p "\\`[A-Za-z0-9+/=]+\\'" state)))))
+
 (provide 'org-mode-google-tasks-sync-oauth-test)
 ;;; org-mode-google-tasks-sync-oauth-test.el ends here
