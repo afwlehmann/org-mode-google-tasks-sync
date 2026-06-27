@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: shellcheck (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - name: shellcheck bootstrap.sh
+        id: shellcheck
+        run: |
+          set -o pipefail
+          nix run nixpkgs#shellcheck -- bootstrap.sh 2>&1 | tee shellcheck.log
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## shellcheck"
+            echo
+            if [ "${{ steps.shellcheck.outcome }}" = "success" ]; then
+              echo "✅ \`bootstrap.sh\` passed shellcheck."
+            else
+              echo "❌ shellcheck found issues:"
+              echo
+              echo '```'
+              cat shellcheck.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  nix-eval:
+    name: nix-eval (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - name: Evaluate flake outputs
+        id: eval
+        run: |
+          nix flake check --no-build --print-build-logs 2>&1 | tee eval.log
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## nix flake check (eval only)"
+            echo
+            if [ "${{ steps.eval.outcome }}" = "success" ]; then
+              echo "✅ All flake outputs evaluated cleanly."
+              echo
+              echo "Outputs evaluated:"
+              grep -oE "checking (derivation|flake output) [^.]+\.[A-Za-z0-9_.-]+" eval.log \
+                | sort -u | sed 's/^/- /'
+            else
+              echo "❌ Evaluation failed."
+              echo
+              echo '```'
+              tail -40 eval.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    name: ert tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, system: x86_64-linux }
+          - { os: macos-latest,  system: aarch64-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - name: Run ert tests
+        id: ert
+        run: |
+          nix build .#checks.${{ matrix.system }}.tests \
+            --print-build-logs --no-link 2>&1 | tee test.log
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## ert tests"
+            echo
+            if grep -qE "^Ran [0-9]+ tests, [0-9]+ results as expected, 0 unexpected" test.log; then
+              line=$(grep -oE "Ran [0-9]+ tests, [0-9]+ results as expected, 0 unexpected" test.log | tail -1)
+              echo "✅ $line"
+            else
+              echo "❌ Test failures or run error."
+              echo
+              echo '```'
+              grep -E "^(   FAILED|Test [a-z/-]+ condition:|Ran )" test.log | tail -30
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: nix build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - name: Build the package
+        id: build
+        run: |
+          nix build .#default --print-build-logs --no-link \
+            --print-out-paths 2>&1 | tee build.log
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## nix build .#default"
+            echo
+            if [ "${{ steps.build.outcome }}" = "success" ]; then
+              path=$(grep -oE '/nix/store/[a-z0-9]{32}-emacs-org-mode-google-tasks-sync-[^[:space:]]+' build.log | tail -1)
+              version=$(echo "$path" | grep -oE 'emacs-org-mode-google-tasks-sync-[0-9][^/]*$')
+              echo "✅ Package built: \`$version\`"
+              echo
+              echo "Store path: \`$path\`"
+            else
+              echo "❌ Build failed."
+              echo
+              echo '```'
+              tail -40 build.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

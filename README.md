@@ -1,3 +1,5 @@
+[![CI](https://github.com/afwlehmann/org-mode-google-tasks-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/afwlehmann/org-mode-google-tasks-sync/actions/workflows/ci.yml)
+
 # org-mode-google-tasks-sync
 
 Pure-Elisp two-way sync between your org-mode files and **Google Tasks**.
