@@ -287,12 +287,25 @@ state machine because state has already moved back to `idle'."
   (funcall done))
 
 (defun org-mode-google-tasks-sync-engine--parent-marker (file parent)
-  "Return marker of PARENT heading in FILE."
+  "Return marker of PARENT heading in FILE, creating the heading if absent.
+Without the auto-create, the engine would silently skip every
+pulled task because there's nowhere to insert it — the file would
+end up containing only the `#+GTASKS_LAST_SYNC' keyword and the
+user would see no tasks despite a successful sync."
   (with-current-buffer (find-file-noselect file)
-    (save-excursion
-      (goto-char (point-min))
-      (when (re-search-forward (format "^\\*+ %s" (regexp-quote parent)) nil t)
-        (point-marker)))))
+    (or (save-excursion
+          (goto-char (point-min))
+          (when (re-search-forward (format "^\\*+ %s$" (regexp-quote parent)) nil t)
+            (point-marker)))
+        (save-excursion
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (insert (format "* %s" parent))
+          (let ((mk (point-marker)))
+            (insert "\n")
+            (org-mode-google-tasks-sync-engine--log
+             "Created parent heading %S in %s" parent file)
+            mk)))))
 
 (defun org-mode-google-tasks-sync-engine--reconcile-one
     (token list-id parent-marker remote local-by-id)

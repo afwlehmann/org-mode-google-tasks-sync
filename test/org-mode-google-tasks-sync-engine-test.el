@@ -167,5 +167,36 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
         (org-mode-google-tasks-sync--after-save-hook)
         (should scheduled)))))
 
+(ert-deftest org-mode-google-tasks-sync-engine-test/parent-marker-auto-creates ()
+  "When the parent heading is absent, the helper creates it and returns a marker."
+  (let ((file (make-temp-file "gtasks-parent-test" nil ".org")))
+    (unwind-protect
+        (let ((marker (org-mode-google-tasks-sync-engine--parent-marker file "Inbox")))
+          (should marker)
+          (with-current-buffer (find-file-noselect file)
+            (goto-char (point-min))
+            (should (re-search-forward "^\\* Inbox$" nil t))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/parent-marker-finds-existing ()
+  "When the parent heading already exists, the helper returns its marker without duplicating it."
+  (let ((file (make-temp-file "gtasks-parent-existing" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TITLE: Tasks\n\n* Inbox\n** TODO Some pre-existing task\n"))
+          (let ((marker (org-mode-google-tasks-sync-engine--parent-marker file "Inbox")))
+            (should marker)
+            (with-current-buffer (find-file-noselect file)
+              (goto-char (point-min))
+              ;; Exactly one "* Inbox" line — no duplicate created.
+              (should (re-search-forward "^\\* Inbox$" nil t))
+              (should-not (re-search-forward "^\\* Inbox$" nil t))
+              (kill-buffer))))
+      (delete-file file))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here
