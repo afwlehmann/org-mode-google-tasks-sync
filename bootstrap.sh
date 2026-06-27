@@ -29,5 +29,9 @@ EOF
   exit 1
 fi
 
+# `--refresh` forces Nix to re-resolve the flake input instead of using
+# its cached copy.  Without this, a user who ran an earlier (buggy)
+# version of the script will keep hitting the cached commit even after
+# we've pushed a fix to main.
 exec nix --extra-experimental-features 'nix-command flakes' \
-  run github:afwlehmann/org-mode-google-tasks-sync#bootstrap
+  run --refresh github:afwlehmann/org-mode-google-tasks-sync#bootstrap
