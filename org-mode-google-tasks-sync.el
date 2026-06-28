@@ -64,6 +64,30 @@ one regardless of file mtimes."
 (defvar org-mode-google-tasks-sync--full-timer nil
   "Timer object for the periodic full reconciliation pass.")
 
+(defvar org-mode-google-tasks-sync-command-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "S") #'org-mode-google-tasks-sync-setup)
+    (define-key m (kbd "s") #'org-mode-google-tasks-sync)
+    (define-key m (kbd "f") #'org-mode-google-tasks-sync-full-sync)
+    (define-key m (kbd "n") #'org-mode-google-tasks-sync-new-task)
+    (define-key m (kbd "d") #'org-mode-google-tasks-sync-delete-at-point)
+    (define-key m (kbd "h") #'org-mode-google-tasks-sync-hide-done-mode)
+    (define-key m (kbd "H") #'org-mode-google-tasks-sync-show-done)
+    (define-key m (kbd "r") #'org-mode-google-tasks-sync-show-trash)
+    (define-key m (kbd "R") #'org-mode-google-tasks-sync-restore-at-point)
+    (define-key m (kbd "l") #'org-mode-google-tasks-sync-show-log)
+    (define-key m (kbd "c") #'org-mode-google-tasks-sync-show-conflicts)
+    m)
+  "Single-letter keymap for the package's interactive commands.
+Bind this map under whatever prefix suits you.  The README's
+recommendation is `C-c g' — that prefix is unused by org-mode and
+by org-roam (which lives at `C-c n'), so:
+
+  (global-set-key (kbd \"C-c g\") org-mode-google-tasks-sync-command-map)
+
+gives you `C-c g s' for sync, `C-c g n' for new task, `C-c g h' to
+toggle hide-DONE, and so on.")
+
 (defcustom org-mode-google-tasks-sync-hide-done-by-default nil
   "Whether to auto-enable `org-mode-google-tasks-sync-hide-done-mode' on target files.
 When non-nil, opening any file referenced by
@@ -142,7 +166,7 @@ narrow-to-subtree, etc.) is unaffected.
 To bring a task back from DONE to TODO when you've hit `C-c C-t' by
 mistake, run `M-x org-mode-google-tasks-sync-show-done', navigate to
 the task, `C-c C-t' again, then turn this mode back on."
-  :lighter " HideDone"
+  :lighter " GTasks-Hide"
   :group 'org-mode-google-tasks-sync
   (if org-mode-google-tasks-sync-hide-done-mode
       (progn

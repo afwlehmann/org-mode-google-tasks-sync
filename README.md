@@ -223,6 +223,34 @@ Run into trouble?  See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — covers `(e
 
 ---
 
+## Suggested key bindings
+
+The package ships a `org-mode-google-tasks-sync-command-map` with every interactive command bound to a single letter.  Bind it under a prefix in your `init.el`:
+
+```elisp
+(global-set-key (kbd "C-c g") org-mode-google-tasks-sync-command-map)
+```
+
+`C-c g …` doesn't conflict with stock org-mode (which uses `C-c C-…`, `C-c a`, `C-c c`, `C-c l`, `C-c '` etc.) or with [org-roam](https://www.orgroam.com/) (whose prefix is `C-c n …`).
+
+| Key | Command |
+|---|---|
+| `C-c g S` | `org-mode-google-tasks-sync-setup` (one-time configure + authorize) |
+| `C-c g s` | `org-mode-google-tasks-sync` (incremental sync now) |
+| `C-c g f` | `org-mode-google-tasks-sync-full-sync` |
+| `C-c g n` | `org-mode-google-tasks-sync-new-task` |
+| `C-c g d` | `org-mode-google-tasks-sync-delete-at-point` |
+| `C-c g h` | toggle `org-mode-google-tasks-sync-hide-done-mode` |
+| `C-c g H` | `org-mode-google-tasks-sync-show-done` |
+| `C-c g r` | `org-mode-google-tasks-sync-show-trash` |
+| `C-c g R` | `org-mode-google-tasks-sync-restore-at-point` (inside trash buffer) |
+| `C-c g l` | `org-mode-google-tasks-sync-show-log` |
+| `C-c g c` | `org-mode-google-tasks-sync-show-conflicts` |
+
+Use a different prefix if `C-c g` clashes with something in your own config — the keymap is independent of the prefix you choose.
+
+---
+
 ## Display, ordering, and editing
 
 The engine pulls everything from Google (including DONE tasks) into the synced subtree.  A few helpers keep the view manageable and the edits explicit.
