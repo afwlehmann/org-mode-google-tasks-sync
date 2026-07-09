@@ -46,10 +46,22 @@
                      :false-object :false))
 
 (defun org-mode-google-tasks-sync-api--serialize-json (object)
-  "Serialize OBJECT to JSON.  Drops nil values."
-  (json-serialize (org-mode-google-tasks-sync-api--strip-nils object)
-                  :null-object nil
-                  :false-object :false))
+  "Serialize OBJECT to JSON as a unibyte UTF-8 string.  Drops nil values.
+The result is encoded with `utf-8-unix' so that `length' equals
+`string-bytes' — curl's `CURLOPT_POSTFIELDSIZE' requires this
+agreement, otherwise libcurl fails with CURLE_FAILED_INIT (2) on any
+body containing non-ASCII code points."
+  (let* ((json-str (json-serialize (org-mode-google-tasks-sync-api--strip-nils object)
+                                   :null-object nil
+                                   :false-object :false))
+         (body (encode-coding-string json-str 'utf-8-unix)))
+    (when (fboundp 'org-mode-google-tasks-sync-engine--log-debug)
+      (org-mode-google-tasks-sync-engine--log-debug
+       "serialize-json: len=%d bytes=%d multibyte=%s preview=%S"
+       (length body) (string-bytes body)
+       (not (eq (length body) (string-bytes body)))
+       (substring body 0 (min 80 (length body)))))
+    body))
 
 (defun org-mode-google-tasks-sync-api--strip-nils (alist)
   "Drop entries with nil values from ALIST."

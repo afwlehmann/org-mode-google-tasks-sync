@@ -73,6 +73,13 @@ the hook again — a 1-Hz loop).")
             (apply #'format fmt args)
             "\n")))
 
+(defun org-mode-google-tasks-sync-engine--log-debug (fmt &rest args)
+  "Like `--log', but only emits at debug log-level.
+Use for per-request diagnostics (body length/bytes, encoding flags)
+that would be too noisy at the default `info' level."
+  (when (eq (bound-and-true-p org-mode-google-tasks-sync-log-level) 'debug)
+    (apply #'org-mode-google-tasks-sync-engine--log fmt args)))
+
 (defun org-mode-google-tasks-sync-engine--remote-task->struct (remote list-id existing-marker)
   "Build a task struct from a REMOTE alist.  Carries EXISTING-MARKER if known."
   (make-org-mode-google-tasks-sync-org-task

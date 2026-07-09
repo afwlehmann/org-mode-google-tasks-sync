@@ -39,6 +39,18 @@
     (should (eq 'conflict-local-wins
                 (org-mode-google-tasks-sync-engine--decide t t local-mtime remote-updated)))))
 
+(ert-deftest org-mode-google-tasks-sync-engine-test/decide-both-done-conflict ()
+  "Both sides mark the task done, remote newer → conflict-remote-wins.
+When the task is completed on both sides, the status field (which is in
+the canonical hash) differs from the stored hash on both sides, so both
+local-changed and remote-changed are true.  The newer remote timestamp
+wins rather than emitting a redundant push that would hit an already-done
+remote task."
+  (let ((local-mtime (float-time (parse-iso8601-time-string "2026-06-27T10:00:00Z")))
+        (remote-updated "2026-06-27T11:00:00Z"))
+    (should (eq 'conflict-remote-wins
+                (org-mode-google-tasks-sync-engine--decide t t local-mtime remote-updated)))))
+
 ;;; -- RFC3339 parsing -------------------------------------------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/rfc3339-roundtrip ()
@@ -100,9 +112,55 @@
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/task->api-data-completed ()
   (let* ((task (make-org-mode-google-tasks-sync-org-task
-                :title "Buy milk" :status 'completed))
-         (data (org-mode-google-tasks-sync-engine--task->api-data task)))
+                 :title "Buy milk" :status 'completed))
+          (data (org-mode-google-tasks-sync-engine--task->api-data task)))
     (should (equal "completed" (alist-get 'status data)))))
+
+;;; -- Non-ASCII encoding ------------------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/task->api-data-non-ascii-title ()
+  "Non-ASCII characters in the title survive the struct→alist conversion."
+  (let* ((task (make-org-mode-google-tasks-sync-org-task
+                :title "Wöchentliche · Überprüfung"
+                :status 'needsAction))
+         (data (org-mode-google-tasks-sync-engine--task->api-data task)))
+    (should (equal "Wöchentliche · Überprüfung" (alist-get 'title data)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/task->api-data-non-ascii-notes ()
+  "Non-ASCII characters in notes survive even when the title is pure ASCII.
+Covers the case where only the body (not the title) carries non-ASCII —
+the original symptom for tasks like \"PayPal\" and \"FAZID Banner Epic\"."
+  (let* ((task (make-org-mode-google-tasks-sync-org-task
+                :title "PayPal"
+                :notes "Zahlung über Fußweg"
+                :status 'needsAction))
+         (data (org-mode-google-tasks-sync-engine--task->api-data task)))
+    (should (equal "PayPal" (alist-get 'title data)))
+    (should (equal "Zahlung über Fußweg" (alist-get 'notes data)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/serialize-json-returns-unibyte ()
+  "The serialized JSON body is a unibyte string: length == string-bytes.
+This is the invariant curl's CURLOPT_POSTFIELDSIZE requires; violating it
+surfaces as CURLE_FAILED_INIT (2) on any body with non-ASCII code points."
+  (let* ((data `((title . "Wöchentliche · Überprüfung")
+                 (notes . "Zahlung über Fußweg")
+                 (status . "needsAction")))
+         (body (org-mode-google-tasks-sync-api--serialize-json data)))
+    (should (stringp body))
+    (should (eq (length body) (string-bytes body)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/serialize-json-preserves-non-ascii-codepoints ()
+  "Non-ASCII codepoints survive a serialize → parse round-trip."
+  (let* ((data `((title . "Wöchentliche · Überprüfung")
+                 (notes . "Zahlung über Fußweg")
+                 (status . "needsAction")))
+         (body (org-mode-google-tasks-sync-api--serialize-json data))
+         (back (json-parse-string body
+                                  :object-type 'alist
+                                  :null-object nil
+                                  :false-object :false)))
+    (should (equal "Wöchentliche · Überprüfung" (alist-get 'title back)))
+    (should (equal "Zahlung über Fußweg" (alist-get 'notes back)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/run-keeps-state-idle-on-token-error ()
   "If `engine--token' throws, `engine-run' must leave `--state' alone.

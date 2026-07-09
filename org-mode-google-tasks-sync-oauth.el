@@ -201,9 +201,9 @@ ON-SUCCESS, if non-nil, is funcalled after the refresh token has been saved."
                 "&client_id=" (url-hexify-string client-id)
                 "&client_secret=" (url-hexify-string client-secret)
                 "&redirect_uri=" (url-hexify-string redirect))))
-    (plz 'post org-mode-google-tasks-sync-oauth--token-url
-      :headers '(("Content-Type" . "application/x-www-form-urlencoded"))
-      :body body
+     (plz 'post org-mode-google-tasks-sync-oauth--token-url
+       :headers '(("Content-Type" . "application/x-www-form-urlencoded"))
+       :body (encode-coding-string body 'utf-8-unix)
       :as (lambda () (json-parse-string (buffer-string)
                                         :object-type 'alist
                                         :null-object nil
@@ -243,7 +243,7 @@ Refreshes via the stored refresh_token if necessary."
          (response-string
           (plz 'post org-mode-google-tasks-sync-oauth--token-url
             :headers '(("Content-Type" . "application/x-www-form-urlencoded"))
-            :body body
+            :body (encode-coding-string body 'utf-8-unix)
             :as 'string))
          (resp (json-parse-string response-string
                                   :object-type 'alist
