@@ -225,11 +225,14 @@ Run into trouble?  See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — covers `(e
 
 ## Suggested key bindings
 
-The package ships a `org-mode-google-tasks-sync-command-map` with every interactive command bound to a single letter.  Bind it under a prefix in your `init.el`:
+The package does **not** install keybindings itself — it only ships the `org-mode-google-tasks-sync-command-map` keymap.  Bind it under a prefix in your `init.el`, guarded by `with-eval-after-load` so the keymap variable is non-nil at bind time:
 
 ```elisp
-(global-set-key (kbd "C-c g") org-mode-google-tasks-sync-command-map)
+(with-eval-after-load 'org-mode-google-tasks-sync
+  (global-set-key (kbd "C-c g") org-mode-google-tasks-sync-command-map))
 ```
+
+The `with-eval-after-load` guard matters: without it, the keymap is still `nil` if your init runs the `global-set-key` before the package is loaded (common with `use-package :defer t` or when the line sits ahead of the `require`).  `C-c g` then silently binds to nothing — `M-x org-mode-google-tasks-sync` still works (the commands are autoloaded) but the keys are dead.  If your `C-c g …` chords don't respond, check `C-h v org-mode-google-tasks-sync-command-map RET` — `nil` means the package isn't loaded yet.
 
 `C-c g …` doesn't conflict with stock org-mode (which uses `C-c C-…`, `C-c a`, `C-c c`, `C-c l`, `C-c '` etc.) or with [org-roam](https://www.orgroam.com/) (whose prefix is `C-c n …`).
 
