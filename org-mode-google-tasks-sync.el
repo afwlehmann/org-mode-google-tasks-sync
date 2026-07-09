@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: MIT
 
 ;; Author: Alexander Lehmann <afwlehmann@googlemail.com>
-;; Version: 0.2.1
+;; Version: 0.2.2
 ;; Package-Requires: ((emacs "27.1") (plz "0.7") (oauth2 "0.16") (org "9.5"))
 ;; Keywords: org, calendar, tools
 

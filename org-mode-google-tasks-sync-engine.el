@@ -455,17 +455,18 @@ LOCAL-BY-ID is a hash table of local tasks keyed by ID."
    (cons (cons 'id (org-mode-google-tasks-sync-org-task-id task))
          (org-mode-google-tasks-sync-engine--task->api-data task))
    (org-mode-google-tasks-sync-org-task-etag task)
-   (lambda (resp)
-     (let ((updated (alist-get 'updated resp))
-           (etag (alist-get 'etag resp)))
-       (setf (org-mode-google-tasks-sync-org-task-updated task) updated)
-       (setf (org-mode-google-tasks-sync-org-task-etag task) etag)
-       (when (org-mode-google-tasks-sync-org-task-marker task)
-         (save-excursion
-           (goto-char (org-mode-google-tasks-sync-org-task-marker task))
-           (org-mode-google-tasks-sync-org-write-task task))))
-     (org-mode-google-tasks-sync-engine--log "Pushed: %s"
-                                        (org-mode-google-tasks-sync-org-task-title task)))
+    (lambda (resp)
+      (let ((updated (alist-get 'updated resp))
+            (etag (alist-get 'etag resp)))
+        (setf (org-mode-google-tasks-sync-org-task-updated task) updated)
+        (setf (org-mode-google-tasks-sync-org-task-etag task) etag)
+        (when (org-mode-google-tasks-sync-org-task-marker task)
+          (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
+            (save-excursion
+              (goto-char (org-mode-google-tasks-sync-org-task-marker task))
+              (org-mode-google-tasks-sync-org-write-task task)))))
+      (org-mode-google-tasks-sync-engine--log "Pushed: %s"
+                                         (org-mode-google-tasks-sync-org-task-title task)))
    (lambda (err)
      (org-mode-google-tasks-sync-engine--log "Push error: %S (task=%s)"
                                         err
@@ -476,16 +477,17 @@ LOCAL-BY-ID is a hash table of local tasks keyed by ID."
   (org-mode-google-tasks-sync-api-insert-task
    token list-id
    (org-mode-google-tasks-sync-engine--task->api-data task)
-   (lambda (resp)
-     (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
-     (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
-     (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
-     (when (org-mode-google-tasks-sync-org-task-marker task)
-       (save-excursion
-         (goto-char (org-mode-google-tasks-sync-org-task-marker task))
-         (org-mode-google-tasks-sync-org-write-task task)))
-     (org-mode-google-tasks-sync-engine--log "Pushed new: %s"
-                                        (org-mode-google-tasks-sync-org-task-title task)))
+    (lambda (resp)
+      (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
+      (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
+      (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
+      (when (org-mode-google-tasks-sync-org-task-marker task)
+        (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
+          (save-excursion
+            (goto-char (org-mode-google-tasks-sync-org-task-marker task))
+            (org-mode-google-tasks-sync-org-write-task task))))
+      (org-mode-google-tasks-sync-engine--log "Pushed new: %s"
+                                         (org-mode-google-tasks-sync-org-task-title task)))
    (lambda (err)
      (org-mode-google-tasks-sync-engine--log "Insert error: %S (task=%s)"
                                         err
