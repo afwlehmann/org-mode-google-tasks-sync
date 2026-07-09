@@ -448,11 +448,12 @@ LOCAL-BY-ID is a hash table of local tasks keyed by ID."
                                        (org-mode-google-tasks-sync-org-task-title task))))
 
 (defun org-mode-google-tasks-sync-engine--push-update (token list-id task)
-  "PATCH TASK to Google in LIST-ID using TOKEN.  Fire-and-forget with logging."
+  "Push TASK to Google in LIST-ID using TOKEN.  Fire-and-forget with logging."
   (org-mode-google-tasks-sync-api-patch-task
    token list-id
    (org-mode-google-tasks-sync-org-task-id task)
-   (org-mode-google-tasks-sync-engine--task->api-data task)
+   (cons (cons 'id (org-mode-google-tasks-sync-org-task-id task))
+         (org-mode-google-tasks-sync-engine--task->api-data task))
    (org-mode-google-tasks-sync-org-task-etag task)
    (lambda (resp)
      (let ((updated (alist-get 'updated resp))

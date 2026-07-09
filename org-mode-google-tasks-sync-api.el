@@ -131,11 +131,14 @@ Call THEN with the response."
     :else else))
 
 (defun org-mode-google-tasks-sync-api-patch-task (token list-id task-id patch-data etag then else)
-  "PATCH TASK-ID in LIST-ID using TOKEN with PATCH-DATA.
+  "Update TASK-ID in LIST-ID using TOKEN with PATCH-DATA.
+Uses PUT (tasks.update) instead of PATCH because plz < 0.10 does not
+support the PATCH method.  Since we always send the full task body
+\(title, notes, status, due), PUT semantics are equivalent.
 Optional ETAG sent as If-Match.
 THEN receives the updated task; ELSE on error (including 412 ETag mismatch)."
-  (plz 'patch (concat org-mode-google-tasks-sync-api--base-url
-                      "/lists/" list-id "/tasks/" task-id)
+  (plz 'put (concat org-mode-google-tasks-sync-api--base-url
+                     "/lists/" list-id "/tasks/" task-id)
     :headers (append (org-mode-google-tasks-sync-api--auth-header token)
                      '(("Content-Type" . "application/json"))
                      (when etag `(("If-Match" . ,etag))))
