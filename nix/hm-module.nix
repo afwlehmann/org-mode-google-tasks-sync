@@ -230,6 +230,42 @@ in
       '';
     };
 
+    logLevel = lib.mkOption {
+      type = lib.types.enum [ "info" "debug" ];
+      default = "info";
+      description = ''
+        Log verbosity for the sync engine.  `info` logs sync actions
+        (pulls, pushes, deletes, conflicts).  `debug` additionally
+        logs per-request diagnostics (body length/bytes, encoding
+        flags) useful for diagnosing push failures.
+      '';
+    };
+
+    persistTrash = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether to persist the deletion trash buffer to disk at
+        `$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org`.
+        Survives Emacs restarts so accidental deletions remain
+        recoverable across sessions.
+      '';
+    };
+
+    oauthWriteTarget = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        File path to which the OAuth refresh token is saved.  When
+        `null` (default), the Elisp default (`~/.authinfo.gpg`) is
+        used, or — if `clientId`/`clientSecretFile`/`gpgRecipient`
+        are set — the declarative credentials bridge sets this to
+        `$XDG_DATA_HOME/org-mode-google-tasks-sync/dynamic-creds.authinfo.gpg`
+        automatically.  Set explicitly only if you need a custom
+        auth-source file for the refresh token.
+      '';
+    };
+
     extraConfig = lib.mkOption {
       type = lib.types.lines;
       default = "";
@@ -280,6 +316,15 @@ in
           (setq org-mode-google-tasks-sync-hide-done-by-default ${
             if cfg.hideDoneByDefault then "t" else "nil"
           })
+          (setq org-mode-google-tasks-sync-log-level '${cfg.logLevel})
+          (setq org-mode-google-tasks-sync-persist-trash ${
+            if cfg.persistTrash then "t" else "nil"
+          })
+          ${
+            lib.optionalString (cfg.oauthWriteTarget != null && !hasStaticCreds) ''
+              (setq org-mode-google-tasks-sync-oauth-write-target "${cfg.oauthWriteTarget}")
+            ''
+          }
           ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}
           ${lib.optionalString (cfg.keyPrefix != null) ''
             (with-eval-after-load 'org-mode-google-tasks-sync
