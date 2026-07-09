@@ -50,7 +50,7 @@ target so they never clobber a read-only source."
   :group 'org-mode-google-tasks-sync)
 
 (defun org-mode-google-tasks-sync-oauth--read-secret (login)
-  "Read a secret from auth-source by LOGIN.  Returns nil if not found."
+  "Read a secret from auth-source by LOGIN.  Return nil if not found."
   (let* ((found (car (auth-source-search
                       :host org-mode-google-tasks-sync-oauth--host
                       :user login
@@ -191,7 +191,8 @@ chain into `org-mode-google-tasks-sync-list-discover'."
       (message "Browser opened.  Complete consent in your browser..."))))
 
 (defun org-mode-google-tasks-sync-oauth--exchange-code (client-id client-secret code &optional on-success)
-  "Exchange CODE for tokens.  Persist refresh_token in auth-source.
+  "Exchange CODE for tokens using CLIENT-ID and CLIENT-SECRET.
+Persist refresh_token in auth-source.
 ON-SUCCESS, if non-nil, is funcalled after the refresh token has been saved."
   (let* ((redirect (format "http://127.0.0.1:%d/"
                            org-mode-google-tasks-sync-oauth--server-port))
@@ -234,7 +235,9 @@ Refreshes via the stored refresh_token if necessary."
      client-id client-secret refresh)))
 
 (defun org-mode-google-tasks-sync-oauth--refresh-access-token (client-id client-secret refresh)
-  "Synchronously exchange REFRESH for a new access token.  Returns a token struct."
+  "Synchronously exchange REFRESH for a new access token.
+Uses CLIENT-ID and CLIENT-SECRET for the token endpoint.
+Return a token struct."
   (let* ((body (concat
                 "grant_type=refresh_token"
                 "&refresh_token=" (url-hexify-string refresh)

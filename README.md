@@ -252,6 +252,20 @@ The `with-eval-after-load` guard matters: without it, the keymap is still `nil` 
 
 Use a different prefix if `C-c g` clashes with something in your own config — the keymap is independent of the prefix you choose.
 
+### Home Manager users
+
+The Home Manager module auto-binds the keymap for you via the `keyPrefix` option (default: `"C-c g"`).  The binding is emitted into `programs.emacs.extraConfig` with a `with-eval-after-load` guard, so it works regardless of your Emacs package or load order.  To change the prefix:
+
+```nix
+programs.org-mode-google-tasks-sync.keyPrefix = "C-c t";
+```
+
+To disable auto-binding entirely (e.g. if you wire keys yourself):
+
+```nix
+programs.org-mode-google-tasks-sync.keyPrefix = null;
+```
+
 ---
 
 ## Display, ordering, and editing

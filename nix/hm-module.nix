@@ -40,17 +40,20 @@
 #     };
 #   };
 
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.programs.org-mode-google-tasks-sync;
 
-  hasStaticCreds = cfg.clientId != null
-                   && cfg.clientSecretFile != null
-                   && cfg.gpgRecipient != null;
+  hasStaticCreds = cfg.clientId != null && cfg.clientSecretFile != null && cfg.gpgRecipient != null;
 
   xdgDir = "${config.xdg.dataHome}/org-mode-google-tasks-sync";
-  staticPath  = "${xdgDir}/static-creds.authinfo.gpg";
+  staticPath = "${xdgDir}/static-creds.authinfo.gpg";
   dynamicPath = "${xdgDir}/dynamic-creds.authinfo.gpg";
   dirLocalsPath = "${xdgDir}/.dir-locals.el";
 
@@ -74,11 +77,9 @@ let
 
   mapAsElisp =
     let
-      entry = id: e:
-        ''("${id}" . ("${e.file}" . "${e.parentHeading}"))'';
+      entry = id: e: ''("${id}" . ("${e.file}" . "${e.parentHeading}"))'';
     in
-    lib.concatStringsSep "\n            "
-      (lib.mapAttrsToList entry cfg.map);
+    lib.concatStringsSep "\n            " (lib.mapAttrsToList entry cfg.map);
 in
 {
   options.programs.org-mode-google-tasks-sync = {
@@ -87,8 +88,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.emacsPackages.org-mode-google-tasks-sync;
-      defaultText = lib.literalExpression
-        "pkgs.emacsPackages.org-mode-google-tasks-sync";
+      defaultText = lib.literalExpression "pkgs.emacsPackages.org-mode-google-tasks-sync";
       description = "Package to install.";
     };
 
@@ -217,6 +217,19 @@ in
       '';
     };
 
+    keyPrefix = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "C-c g";
+      description = ''
+        Key prefix under which to bind
+        `org-mode-google-tasks-sync-command-map` in the generated Emacs
+        config.  The binding is guarded by `with-eval-after-load` so it
+        works regardless of load order.  Set to `null` to skip
+        auto-binding (e.g. if you prefer to wire keys yourself via
+        `extraConfig`).
+      '';
+    };
+
     extraConfig = lib.mkOption {
       type = lib.types.lines;
       default = "";
@@ -224,100 +237,107 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (lib.mkMerge [
-    {
-      assertions = [
-        {
-          assertion = (cfg.clientId == null)
-                       && (cfg.clientSecretFile == null)
-                       && (cfg.gpgRecipient == null)
-                   || (cfg.clientId != null)
-                       && (cfg.clientSecretFile != null)
-                       && (cfg.gpgRecipient != null);
-          message = ''
-            programs.org-mode-google-tasks-sync: clientId, clientSecretFile,
-            and gpgRecipient must all be set together (declarative bridge)
-            or all be null (interactive setup via M-x ...-configure).
-          '';
-        }
-      ];
-
-      # Ensure all the runtime prerequisites are present.  `programs.emacs`
-      # is enabled by default; the user can override with mkForce or by
-      # declaring their own Emacs setup elsewhere.  GnuPG is needed in PATH
-      # for Emacs's EasyPG to read/write `.gpg` auth-source files.  plz and
-      # oauth2 flow in automatically via the package's `packageRequires`.
-      programs.emacs.enable = lib.mkDefault true;
-      programs.emacs.extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
-      home.packages = [ pkgs.gnupg ];
-
-      programs.emacs.extraConfig = lib.mkAfter ''
-        ;; --- org-mode-google-tasks-sync (managed by Home Manager) ---
-        (require 'org-mode-google-tasks-sync)
-        ${lib.optionalString hasStaticCreds ''
-          (with-eval-after-load 'auth-source
-            (add-to-list 'auth-sources "${staticPath}")
-            (add-to-list 'auth-sources "${dynamicPath}"))
-          (setq org-mode-google-tasks-sync-oauth-write-target "${dynamicPath}")
-        ''}
-        (setq org-mode-google-tasks-sync-map
-              '(${mapAsElisp}))
-        (setq org-mode-google-tasks-sync-tick-interval ${toString cfg.tickInterval})
-        (setq org-mode-google-tasks-sync-poll-interval ${toString cfg.pollInterval})
-        (setq org-mode-google-tasks-sync-fetch-timeout ${toString cfg.fetchTimeout})
-        (setq org-mode-google-tasks-sync-full-sync-interval ${toString cfg.fullSyncInterval})
-        (setq org-mode-google-tasks-sync-hide-done-by-default ${if cfg.hideDoneByDefault then "t" else "nil"})
-        ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}
-        ${cfg.extraConfig}
-        ;; --- end org-mode-google-tasks-sync ---
-      '';
-    }
-
-    # When bridge is active: encrypt static-creds + drop .dir-locals.el.
-    # HM never decrypts anything — only encrypts with the public key — so
-    # gpg-agent does NOT need to be unlocked at activation time.
-    (lib.mkIf hasStaticCreds {
-      home.activation.org-mode-google-tasks-sync-credentials =
-        lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-          set -eu
-
-          $DRY_RUN_CMD install -m 0700 -d ${lib.escapeShellArg xdgDir}
-
-          # static-creds.authinfo.gpg — encrypted with the public key.
-          # No decrypt step; no gpg-agent unlock required.
-          tmp=$(mktemp)
-          chmod 600 "$tmp"
+  config = lib.mkIf cfg.enable (
+    lib.mkMerge [
+      {
+        assertions = [
           {
-            printf 'machine api.google.com login org-mode-google-tasks-sync-client-id      password %s\n' \
-              ${lib.escapeShellArg cfg.clientId}
-            printf 'machine api.google.com login org-mode-google-tasks-sync-client-secret  password %s\n' \
-              "$(cat ${lib.escapeShellArg (toString cfg.clientSecretFile)})"
-          } > "$tmp"
-          ${pkgs.gnupg}/bin/gpg --encrypt \
-            --recipient ${lib.escapeShellArg cfg.gpgRecipient} \
-            --batch --yes --trust-model always \
-            --output ${lib.escapeShellArg staticPath} "$tmp"
-          chmod 600 ${lib.escapeShellArg staticPath}
-          rm -f "$tmp"
+            assertion =
+              (cfg.clientId == null) && (cfg.clientSecretFile == null) && (cfg.gpgRecipient == null)
+              || (cfg.clientId != null) && (cfg.clientSecretFile != null) && (cfg.gpgRecipient != null);
+            message = ''
+              programs.org-mode-google-tasks-sync: clientId, clientSecretFile,
+              and gpgRecipient must all be set together (declarative bridge)
+              or all be null (interactive setup via M-x ...-configure).
+            '';
+          }
+        ];
 
-          # .dir-locals.el pins the recipient EasyPG will use when Emacs
-          # writes dynamic-creds.authinfo.gpg.  epa-file-encrypt-to is
-          # marked safe-local-variable in epa-file.el, so no prompt.
-          $DRY_RUN_CMD install -m 0644 /dev/null ${lib.escapeShellArg dirLocalsPath}
-          cat > ${lib.escapeShellArg dirLocalsPath} <<EOF
-          ;;; Generated by Home Manager. Do not edit by hand.
-          ((nil . ((epa-file-encrypt-to . (${lib.escapeShellArg cfg.gpgRecipient})))))
-          EOF
-        '';
-    })
+        # Ensure all the runtime prerequisites are present.  `programs.emacs`
+        # is enabled by default; the user can override with mkForce or by
+        # declaring their own Emacs setup elsewhere.  GnuPG is needed in PATH
+        # for Emacs's EasyPG to read/write `.gpg` auth-source files.  plz and
+        # oauth2 flow in automatically via the package's `packageRequires`.
+        programs.emacs.enable = lib.mkDefault true;
+        programs.emacs.extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
+        home.packages = [ pkgs.gnupg ];
 
-    # When bridge is disabled, remove anything HM put there previously.
-    (lib.mkIf (!hasStaticCreds) {
-      home.activation.org-mode-google-tasks-sync-credentials =
-        lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-          $DRY_RUN_CMD rm -f ${lib.escapeShellArg staticPath} \
-                             ${lib.escapeShellArg dirLocalsPath}
+        programs.emacs.extraConfig = lib.mkAfter ''
+          ;; --- org-mode-google-tasks-sync (managed by Home Manager) ---
+          (require 'org-mode-google-tasks-sync)
+          ${lib.optionalString hasStaticCreds ''
+            (with-eval-after-load 'auth-source
+              (add-to-list 'auth-sources "${staticPath}")
+              (add-to-list 'auth-sources "${dynamicPath}"))
+            (setq org-mode-google-tasks-sync-oauth-write-target "${dynamicPath}")
+          ''}
+          (setq org-mode-google-tasks-sync-map
+                '(${mapAsElisp}))
+          (setq org-mode-google-tasks-sync-tick-interval ${toString cfg.tickInterval})
+          (setq org-mode-google-tasks-sync-poll-interval ${toString cfg.pollInterval})
+          (setq org-mode-google-tasks-sync-fetch-timeout ${toString cfg.fetchTimeout})
+          (setq org-mode-google-tasks-sync-full-sync-interval ${toString cfg.fullSyncInterval})
+          (setq org-mode-google-tasks-sync-hide-done-by-default ${
+            if cfg.hideDoneByDefault then "t" else "nil"
+          })
+          ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}
+          ${lib.optionalString (cfg.keyPrefix != null) ''
+            (with-eval-after-load 'org-mode-google-tasks-sync
+              (global-set-key (kbd "${cfg.keyPrefix}") org-mode-google-tasks-sync-command-map))
+          ''}
+          ${cfg.extraConfig}
+          ;; --- end org-mode-google-tasks-sync ---
         '';
-    })
-  ]);
+      }
+
+      # When bridge is active: encrypt static-creds + drop .dir-locals.el.
+      # HM never decrypts anything — only encrypts with the public key — so
+      # gpg-agent does NOT need to be unlocked at activation time.
+      (lib.mkIf hasStaticCreds {
+        home.activation.org-mode-google-tasks-sync-credentials =
+          lib.hm.dag.entryAfter [ "writeBoundary" ]
+            ''
+              set -eu
+
+              $DRY_RUN_CMD install -m 0700 -d ${lib.escapeShellArg xdgDir}
+
+              # static-creds.authinfo.gpg — encrypted with the public key.
+              # No decrypt step; no gpg-agent unlock required.
+              tmp=$(mktemp)
+              chmod 600 "$tmp"
+              {
+                printf 'machine api.google.com login org-mode-google-tasks-sync-client-id      password %s\n' \
+                  ${lib.escapeShellArg cfg.clientId}
+                printf 'machine api.google.com login org-mode-google-tasks-sync-client-secret  password %s\n' \
+                  "$(cat ${lib.escapeShellArg (toString cfg.clientSecretFile)})"
+              } > "$tmp"
+              ${pkgs.gnupg}/bin/gpg --encrypt \
+                --recipient ${lib.escapeShellArg cfg.gpgRecipient} \
+                --batch --yes --trust-model always \
+                --output ${lib.escapeShellArg staticPath} "$tmp"
+              chmod 600 ${lib.escapeShellArg staticPath}
+              rm -f "$tmp"
+
+              # .dir-locals.el pins the recipient EasyPG will use when Emacs
+              # writes dynamic-creds.authinfo.gpg.  epa-file-encrypt-to is
+              # marked safe-local-variable in epa-file.el, so no prompt.
+              $DRY_RUN_CMD install -m 0644 /dev/null ${lib.escapeShellArg dirLocalsPath}
+              cat > ${lib.escapeShellArg dirLocalsPath} <<EOF
+              ;;; Generated by Home Manager. Do not edit by hand.
+              ((nil . ((epa-file-encrypt-to . (${lib.escapeShellArg cfg.gpgRecipient})))))
+              EOF
+            '';
+      })
+
+      # When bridge is disabled, remove anything HM put there previously.
+      (lib.mkIf (!hasStaticCreds) {
+        home.activation.org-mode-google-tasks-sync-credentials =
+          lib.hm.dag.entryAfter [ "writeBoundary" ]
+            ''
+              $DRY_RUN_CMD rm -f ${lib.escapeShellArg staticPath} \
+                                 ${lib.escapeShellArg dirLocalsPath}
+            '';
+      })
+    ]
+  );
 }

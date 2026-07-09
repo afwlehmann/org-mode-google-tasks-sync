@@ -23,7 +23,7 @@
 (require 'org-mode-google-tasks-sync-engine)
 
 (defgroup org-mode-google-tasks-sync nil
-  "Two-way sync between org-mode and Google Tasks."
+  "Two-way sync between Org mode and Google Tasks."
   :group 'org
   :prefix "org-mode-google-tasks-sync-")
 
@@ -89,7 +89,7 @@ encoding flags) useful for diagnosing push failures."
     m)
   "Single-letter keymap for the package's interactive commands.
 Bind this map under whatever prefix suits you.  The README's
-recommendation is `C-c g' — that prefix is unused by org-mode and
+recommendation is `C-c g' — that prefix is unused by Org mode and
 by org-roam (which lives at `C-c n'), so:
 
   (global-set-key (kbd \"C-c g\") org-mode-google-tasks-sync-command-map)
@@ -98,7 +98,7 @@ gives you `C-c g s' for sync, `C-c g n' for new task, `C-c g h' to
 toggle hide-DONE, and so on.")
 
 (defcustom org-mode-google-tasks-sync-hide-done-by-default nil
-  "Whether to auto-enable `org-mode-google-tasks-sync-hide-done-mode' on target files.
+  "Whether to auto-enable `org-mode-google-tasks-sync-hide-done-mode'.
 When non-nil, opening any file referenced by
 `org-mode-google-tasks-sync-map' turns the mode on automatically.
 Per-buffer; the minor mode itself is opt-in for other files."
@@ -172,9 +172,10 @@ Uses an invisibility overlay keyed by
 `org-mode-google-tasks-sync--hide-done-spec' so other folding (org-fold,
 narrow-to-subtree, etc.) is unaffected.
 
-To bring a task back from DONE to TODO when you've hit `C-c C-t' by
-mistake, run `M-x org-mode-google-tasks-sync-show-done', navigate to
-the task, `C-c C-t' again, then turn this mode back on."
+To bring a task back from DONE to TODO when you've hit
+\\<org-mode-map>\\[org-todo] by mistake, run
+`M-x org-mode-google-tasks-sync-show-done', navigate to the task,
+\\[org-todo] again, then turn this mode back on."
   :lighter " GTasks-Hide"
   :group 'org-mode-google-tasks-sync
   (if org-mode-google-tasks-sync-hide-done-mode
@@ -327,8 +328,9 @@ buffer).  Local deletion happens only after Google confirms."
 (defun org-mode-google-tasks-sync-new-task (title &optional due list-id)
   "Insert a new `* TODO TITLE' under the configured parent and save.
 With one list configured the target is unambiguous; with multiple
-lists a completing-read prompt picks one.  Optional DUE is a
-YYYY-MM-DD string applied as SCHEDULED.  The after-save-hook
+lists a `completing-read' prompt picks one.  Optional DUE is a
+YYYY-MM-DD string applied as SCHEDULED.  Optional LIST-ID selects
+the target list explicitly.  The `after-save-hook'
 triggers a sync ~1 s later, which POSTs the task to Google."
   (interactive
    (let* ((title (read-string "New task title: "))
@@ -452,7 +454,8 @@ re-authorizing after a token revocation)."
 
 ;;;###autoload
 (defun org-mode-google-tasks-sync-list-discover ()
-  "Fetch task lists from Google and offer to populate `org-mode-google-tasks-sync-map'."
+  "Fetch task lists from Google and offer to populate the map.
+Populates `org-mode-google-tasks-sync-map'."
   (interactive)
   (org-mode-google-tasks-sync-engine-discover-lists))
 
@@ -557,7 +560,7 @@ engine's own write would re-trigger the sync chain on every save."
       (run-at-time 1 nil #'org-mode-google-tasks-sync))))
 
 (defun org-mode-google-tasks-sync--file-is-target-p (file)
-  "Return non-nil if FILE is the target of any entry in `org-mode-google-tasks-sync-map'."
+  "Return non-nil if FILE is a target in `org-mode-google-tasks-sync-map'."
   (and file
        (let ((abs (file-truename file)))
          (cl-some (lambda (entry)
@@ -599,7 +602,7 @@ modified since the last sync, or the safety-net interval has elapsed."
          org-mode-google-tasks-sync-poll-interval)))
 
 (defun org-mode-google-tasks-sync--tick ()
-  "Wake-up handler: sync iff the predicate says we should.
+  "Wake-up handler: sync iff the predicate indicates we should.
 Errors during the sync are caught and routed to the log buffer so a
 misconfigured environment (e.g. unavailable GPG) doesn't spam
 *Messages* every `tick-interval' seconds.  The user is expected to

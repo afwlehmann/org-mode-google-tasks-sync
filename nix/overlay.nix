@@ -8,10 +8,13 @@
 # `epkgs.org-mode-google-tasks-sync` inside `programs.emacs.extraPackages = epkgs: ...`.
 
 final: prev: {
-  emacsPackagesFor = emacs:
-    (prev.emacsPackagesFor emacs).overrideScope (eself: _esuper: {
-      org-mode-google-tasks-sync = eself.callPackage ./package.nix { };
-    });
+  emacsPackagesFor =
+    emacs:
+    (prev.emacsPackagesFor emacs).overrideScope (
+      eself: _esuper: {
+        org-mode-google-tasks-sync = eself.callPackage ./package.nix { };
+      }
+    );
 
   emacsPackages = final.emacsPackagesFor final.emacs;
 }

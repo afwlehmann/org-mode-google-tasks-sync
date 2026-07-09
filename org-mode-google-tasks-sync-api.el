@@ -75,7 +75,8 @@ body containing non-ASCII code points."
    alist "&"))
 
 (defun org-mode-google-tasks-sync-api-list-tasklists (token then else)
-  "List all of the user's task lists.  Call THEN with an array of list objects.
+  "List all of the user's task lists using TOKEN.
+Call THEN with an array of list objects.
 Call ELSE on error."
   (plz 'get (concat org-mode-google-tasks-sync-api--base-url "/users/@me/lists")
     :headers (org-mode-google-tasks-sync-api--auth-header token)
@@ -85,13 +86,16 @@ Call ELSE on error."
     :else else))
 
 (defun org-mode-google-tasks-sync-api-list-tasks (token list-id args then else)
-  "List tasks in LIST-ID.  ARGS is an alist of query params.
+  "List tasks in LIST-ID using TOKEN.  ARGS is an alist of query params.
 Calls THEN with a list of task alists across all pages, ELSE on error."
   (org-mode-google-tasks-sync-api--list-tasks-page
    token list-id args nil '() then else))
 
 (defun org-mode-google-tasks-sync-api--list-tasks-page (token list-id args page-token acc then else)
-  "Internal helper to fetch one page of tasks and recurse."
+  "Internal helper to fetch one page of tasks using TOKEN in LIST-ID.
+ARGS is an alist of query params.  Recurses via PAGE-TOKEN,
+accumulating into ACC, until done, then calls THEN with the full
+list or ELSE on error."
   (let* ((base-args `(("maxResults" . ,(number-to-string
                                          org-mode-google-tasks-sync-api--page-size))
                       ("showDeleted" . "true")
@@ -115,7 +119,8 @@ Calls THEN with a list of task alists across all pages, ELSE on error."
       :else else)))
 
 (defun org-mode-google-tasks-sync-api-insert-task (token list-id task-data then else)
-  "POST TASK-DATA (alist) as a new task in LIST-ID.  Call THEN with the response."
+  "POST TASK-DATA (alist) as a new task in LIST-ID using TOKEN.
+Call THEN with the response."
   (plz 'post (concat org-mode-google-tasks-sync-api--base-url
                      "/lists/" list-id "/tasks")
     :headers (append (org-mode-google-tasks-sync-api--auth-header token)
@@ -126,7 +131,8 @@ Calls THEN with a list of task alists across all pages, ELSE on error."
     :else else))
 
 (defun org-mode-google-tasks-sync-api-patch-task (token list-id task-id patch-data etag then else)
-  "PATCH TASK-ID in LIST-ID with PATCH-DATA.  Optional ETAG sent as If-Match.
+  "PATCH TASK-ID in LIST-ID using TOKEN with PATCH-DATA.
+Optional ETAG sent as If-Match.
 THEN receives the updated task; ELSE on error (including 412 ETag mismatch)."
   (plz 'patch (concat org-mode-google-tasks-sync-api--base-url
                       "/lists/" list-id "/tasks/" task-id)
@@ -139,7 +145,8 @@ THEN receives the updated task; ELSE on error (including 412 ETag mismatch)."
     :else else))
 
 (defun org-mode-google-tasks-sync-api-delete-task (token list-id task-id then else)
-  "DELETE TASK-ID in LIST-ID.  THEN is called with nil on success."
+  "DELETE TASK-ID in LIST-ID using TOKEN.
+THEN is called with nil on success."
   (plz 'delete (concat org-mode-google-tasks-sync-api--base-url
                        "/lists/" list-id "/tasks/" task-id)
     :headers (org-mode-google-tasks-sync-api--auth-header token)
@@ -148,7 +155,7 @@ THEN receives the updated task; ELSE on error (including 412 ETag mismatch)."
     :else else))
 
 (defun org-mode-google-tasks-sync-api-get-task (token list-id task-id then else)
-  "GET TASK-ID in LIST-ID.  Used after 412 ETag conflicts."
+  "GET TASK-ID in LIST-ID using TOKEN.  Used after 412 ETag conflicts."
   (plz 'get (concat org-mode-google-tasks-sync-api--base-url
                     "/lists/" list-id "/tasks/" task-id)
     :headers (org-mode-google-tasks-sync-api--auth-header token)

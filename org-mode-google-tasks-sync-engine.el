@@ -18,6 +18,16 @@
 (require 'org-mode-google-tasks-sync-org)
 (require 'org-mode-google-tasks-sync-oauth)
 
+(defvar org-mode-google-tasks-sync-map nil
+  "Alist mapping Google Tasks list IDs to org file + parent heading.
+Defined in `org-mode-google-tasks-sync.el'; declared here so the
+engine can reference it without a circular require.")
+
+(defvar org-mode-google-tasks-sync-log-level nil
+  "Log verbosity for the sync engine.
+Defined in `org-mode-google-tasks-sync.el'; declared here so the
+engine can reference it without a circular require.")
+
 (defconst org-mode-google-tasks-sync-engine--log-buffer-name
   "*org-mode-google-tasks-sync-log*")
 
@@ -37,7 +47,9 @@ slow network and healthy syncs are being treated as hung."
   "Current sync state.  One of idle, fetching, applying, pushing.")
 
 (defvar org-mode-google-tasks-sync-engine--timeout-timer nil
-  "Timer that resets state if a sync hangs past `org-mode-google-tasks-sync-fetch-timeout'.")
+  "Timer that resets state if a sync hangs.
+Resets when a sync hangs past
+`org-mode-google-tasks-sync-fetch-timeout'.")
 
 (defvar org-mode-google-tasks-sync-engine--last-sync-time nil
   "`float-time' of the last sync that reached `idle' again.
@@ -66,7 +78,8 @@ the hook again — a 1-Hz loop).")
     buf))
 
 (defun org-mode-google-tasks-sync-engine--log (fmt &rest args)
-  "Append a timestamped line to the log buffer."
+  "Append a timestamped line to the log buffer.
+FMT is a `format' spec string; ARGS are its arguments."
   (with-current-buffer (org-mode-google-tasks-sync-engine-log-buffer)
     (goto-char (point-max))
     (insert (format-time-string "[%Y-%m-%d %H:%M:%S] ")
@@ -75,13 +88,15 @@ the hook again — a 1-Hz loop).")
 
 (defun org-mode-google-tasks-sync-engine--log-debug (fmt &rest args)
   "Like `--log', but only emits at debug log-level.
+FMT is a `format' spec string; ARGS are its arguments.
 Use for per-request diagnostics (body length/bytes, encoding flags)
 that would be too noisy at the default `info' level."
   (when (eq (bound-and-true-p org-mode-google-tasks-sync-log-level) 'debug)
     (apply #'org-mode-google-tasks-sync-engine--log fmt args)))
 
 (defun org-mode-google-tasks-sync-engine--remote-task->struct (remote list-id existing-marker)
-  "Build a task struct from a REMOTE alist.  Carries EXISTING-MARKER if known."
+  "Build a task struct from a REMOTE alist in LIST-ID.
+Carries EXISTING-MARKER if known."
   (make-org-mode-google-tasks-sync-org-task
    :id        (alist-get 'id remote)
    :list-id   list-id
@@ -118,7 +133,9 @@ that would be too noisy at the default `info' level."
     data))
 
 (defun org-mode-google-tasks-sync-engine--decide (local-changed remote-changed local-mtime remote-updated)
-  "Return one of: skip, push, pull, conflict-local-wins, conflict-remote-wins."
+  "Return one of: skip, push, pull, conflict-local-wins, conflict-remote-wins.
+LOCAL-CHANGED and REMOTE-CHANGED are booleans.
+LOCAL-MTIME is `float-time'; REMOTE-UPDATED is an RFC3339 string."
   (cond
    ((and (not local-changed) (not remote-changed)) 'skip)
    ((and local-changed (not remote-changed)) 'push)
@@ -129,12 +146,12 @@ that would be too noisy at the default `info' level."
 
 (defun org-mode-google-tasks-sync-engine--remote-newer-p (local-mtime remote-updated)
   "Return non-nil if REMOTE-UPDATED is after LOCAL-MTIME.
-LOCAL-MTIME is float-time; REMOTE-UPDATED is RFC3339 string."
+LOCAL-MTIME is `float-time'; REMOTE-UPDATED is an RFC3339 string."
   (let ((remote-ft (org-mode-google-tasks-sync-engine--rfc3339-to-float remote-updated)))
     (and remote-ft (> remote-ft (or local-mtime 0)))))
 
 (defun org-mode-google-tasks-sync-engine--rfc3339-to-float (s)
-  "Convert RFC3339 string S to float-time, or nil."
+  "Convert RFC3339 string S to `float-time', or nil."
   (when (and s (stringp s))
     (condition-case nil
         (float-time (parse-iso8601-time-string s))
@@ -214,7 +231,7 @@ state machine because state has already moved back to `idle'."
     (setq org-mode-google-tasks-sync-engine--state 'idle)))
 
 (defun org-mode-google-tasks-sync-engine--sync-next (entries token mode)
-  "Drive sync sequentially over ENTRIES."
+  "Drive sync sequentially over ENTRIES using TOKEN in MODE."
   (if (null entries)
       (progn
         (setq org-mode-google-tasks-sync-engine--state 'idle)
@@ -232,7 +249,9 @@ state machine because state has already moved back to `idle'."
        (lambda () (org-mode-google-tasks-sync-engine--sync-next (cdr entries) token mode))))))
 
 (defun org-mode-google-tasks-sync-engine--sync-one (token list-id file parent mode done)
-  "Sync one list end-to-end, calling DONE when finished."
+  "Sync one list end-to-end using TOKEN in LIST-ID from FILE.
+PARENT is the heading under which tasks live.
+MODE is `incremental' or `full'.  Calls DONE when finished."
   (let* ((parent-exists-p
           (with-current-buffer (find-file-noselect file)
             (save-excursion
@@ -279,7 +298,9 @@ state machine because state has already moved back to `idle'."
 
 (defun org-mode-google-tasks-sync-engine--apply
     (token list-id file parent mode remote-tasks done)
-  "Reconcile REMOTE-TASKS against the local subtree under PARENT in FILE."
+  "Reconcile REMOTE-TASKS against the local subtree under PARENT in FILE.
+Uses TOKEN for pushes.  LIST-ID is the Google Tasks list.
+MODE is `incremental' or `full'.  Calls DONE when finished."
   (setq org-mode-google-tasks-sync-engine--state 'applying)
   (with-current-buffer (find-file-noselect file)
     (let* ((local (org-mode-google-tasks-sync-org-collect-tasks-under file parent list-id))
@@ -321,7 +342,7 @@ Tuple: (done? position-string completed-string).  Used together with
         (or (org-entry-get nil "GTASK_COMPLETED") "")))
 
 (defun org-mode-google-tasks-sync-engine--compare-tasks (a b)
-  "Compare two `--task-sort-key' tuples.
+  "Compare two `--task-sort-key' tuples A and B.
 TODOs come before DONEs; among TODOs, position ascending; among DONEs,
 completed timestamp descending (newest first)."
   (cond
@@ -368,7 +389,10 @@ user would see no tasks despite a successful sync."
 
 (defun org-mode-google-tasks-sync-engine--reconcile-one
     (token list-id parent-marker remote local-by-id)
-  "Apply the 4-cell matrix to REMOTE against the local task (if any)."
+  "Apply the 4-cell matrix to REMOTE against the local task (if any).
+Uses TOKEN for pushes.  LIST-ID is the Google Tasks list.
+PARENT-MARKER is the org heading under which tasks live.
+LOCAL-BY-ID is a hash table of local tasks keyed by ID."
   (let* ((id (alist-get 'id remote))
          (deleted (alist-get 'deleted remote))
          (local (gethash id local-by-id)))
@@ -409,14 +433,14 @@ user would see no tasks despite a successful sync."
            (org-mode-google-tasks-sync-engine--push-update token list-id local))))))))
 
 (defun org-mode-google-tasks-sync-engine--marker-mtime (marker)
-  "Return float-time of the file backing MARKER, or nil."
+  "Return `float-time' of the file backing MARKER, or nil."
   (let ((buf (marker-buffer marker)))
     (when (and buf (buffer-file-name buf))
       (let ((attrs (file-attributes (buffer-file-name buf))))
         (when attrs (float-time (file-attribute-modification-time attrs)))))))
 
 (defun org-mode-google-tasks-sync-engine--apply-pull (list-id local remote)
-  "Apply REMOTE fields onto LOCAL task struct in-buffer."
+  "Apply REMOTE fields onto LOCAL task struct in LIST-ID in-buffer."
   (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
                 remote list-id (org-mode-google-tasks-sync-org-task-marker local))))
     (org-mode-google-tasks-sync-org-write-task task)
@@ -424,7 +448,7 @@ user would see no tasks despite a successful sync."
                                        (org-mode-google-tasks-sync-org-task-title task))))
 
 (defun org-mode-google-tasks-sync-engine--push-update (token list-id task)
-  "PATCH TASK to Google.  Fire-and-forget with logging."
+  "PATCH TASK to Google in LIST-ID using TOKEN.  Fire-and-forget with logging."
   (org-mode-google-tasks-sync-api-patch-task
    token list-id
    (org-mode-google-tasks-sync-org-task-id task)
@@ -447,7 +471,7 @@ user would see no tasks despite a successful sync."
                                         (org-mode-google-tasks-sync-org-task-title task)))))
 
 (defun org-mode-google-tasks-sync-engine--push-new (token list-id task)
-  "POST a new TASK to Google."
+  "POST a new TASK to Google in LIST-ID using TOKEN."
   (org-mode-google-tasks-sync-api-insert-task
    token list-id
    (org-mode-google-tasks-sync-engine--task->api-data task)

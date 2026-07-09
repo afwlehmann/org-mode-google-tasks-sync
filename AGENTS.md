@@ -119,6 +119,49 @@ Test files:
 
 There are intentionally no tests that hit the real Google API — those would be flaky and require credentials. Integration testing is manual; see the README troubleshooting section and the verification plan in the original design doc at `~/.claude/plans/i-need-tooling-to-dapper-moonbeam.md`.
 
+## Linting and formatting
+
+All Emacs Lisp source files must pass **byte-compile** (zero warnings) and **checkdoc** (zero warnings) checks. A combined lint script is at `hooks/lint.el`:
+
+```sh
+nix develop --command emacs --batch -L . -l hooks/lint.el -f org-mode-google-tasks-sync-lint
+```
+
+Without Nix:
+
+```sh
+emacs --batch -L . -l hooks/lint.el -f org-mode-google-tasks-sync-lint
+```
+
+Exits non-zero if any warning is found. The script lints the five package source files (not test files).
+
+### Git hooks (via git-hooks.nix)
+
+Pre-commit and commit-msg hooks are managed by [git-hooks.nix](https://github.com/cachix/git-hooks.nix). Entering the dev shell auto-installs them — no manual `cp` to `.git/hooks/` needed:
+
+```sh
+nix develop   # hooks are installed automatically
+```
+
+Hooks configured (see `flake.nix`):
+- **convco** (commit-msg) — enforces Conventional Commits.
+- **emacs-lint-checks** (pre-commit) — runs `hooks/lint.el` + the full ert test suite when `.el` files are staged.
+- **nixfmt-classic** (pre-commit) — formats `.nix` files.
+
+Run all hooks manually: `nix develop -c pre-commit run --all-files`
+
+Bypass with `git commit --no-verify`.
+
+### Docstring conventions
+
+checkdoc enforces standard Emacs Lisp docstring conventions. Key rules:
+- **Argument names in UPPERCASE** in docstrings (`TOKEN`, not `token`; `LIST-ID`, not `list-id`).
+- **Lisp symbols in backquotes** (`` `float-time' ``, not bare `float-time`).
+- **First line is a complete sentence** ending with a period.
+- **Imperative mood** ("Return", not "Returns").
+- **Lines under 80 characters** (byte-compile enforces this).
+- **No unescaped single quotes** — use `` `symbol' `` or `\='symbol\='`.
+
 ## Conventions
 
 - **No exceptions across module boundaries.** Each public function either returns a value or invokes a callback. Errors from `plz` go through the `:else` callback.

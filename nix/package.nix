@@ -1,10 +1,18 @@
-{ trivialBuild, plz, oauth2, lib }:
+{
+  trivialBuild,
+  plz,
+  oauth2,
+  lib,
+}:
 
 trivialBuild {
   pname = "org-mode-google-tasks-sync";
   version = "0.1.0";
   src = ../.;
-  packageRequires = [ plz oauth2 ];
+  packageRequires = [
+    plz
+    oauth2
+  ];
 
   # Tests aren't shipped with the installed package; they're only run via
   # `nix flake check`.

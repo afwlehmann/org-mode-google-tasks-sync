@@ -70,7 +70,8 @@ status (which IS in the hash) covers the meaningful state change.")
 
 (defun org-mode-google-tasks-sync-org--todo-state (element)
   "Return the TODO state symbol for headline ELEMENT.
-'needsAction if state is a not-done keyword or nil, 'completed if a done keyword."
+`needsAction' if state is a not-done keyword or nil, `completed'
+if a done keyword."
   (let ((kw (org-element-property :todo-type element)))
     (if (eq kw 'done) 'completed 'needsAction)))
 
