@@ -355,16 +355,17 @@ completed timestamp descending (newest first)."
   "Sort children of PARENT-MARKER by `--task-sort-key' / `--compare-tasks'.
 Returns silently when PARENT-MARKER is nil or points at no heading."
   (when (and parent-marker (marker-buffer parent-marker))
-    (save-excursion
-      (goto-char parent-marker)
-      (when (org-at-heading-p)
-        (condition-case err
-            (org-sort-entries nil ?f
-                              #'org-mode-google-tasks-sync-engine--task-sort-key
-                              #'org-mode-google-tasks-sync-engine--compare-tasks)
-          (error
-           (org-mode-google-tasks-sync-engine--log
-            "Sort skipped: %S" err)))))))
+    (with-current-buffer (marker-buffer parent-marker)
+      (save-excursion
+        (goto-char parent-marker)
+        (when (org-at-heading-p)
+          (condition-case err
+              (org-sort-entries nil ?f
+                                #'org-mode-google-tasks-sync-engine--task-sort-key
+                                #'org-mode-google-tasks-sync-engine--compare-tasks)
+            (error
+             (org-mode-google-tasks-sync-engine--log
+              "Sort skipped: %S" err))))))))
 
 (defun org-mode-google-tasks-sync-engine--parent-marker (file parent)
   "Return marker of PARENT heading in FILE, creating the heading if absent.

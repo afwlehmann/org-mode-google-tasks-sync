@@ -149,6 +149,16 @@ Excludes priority cookies, IDs, etags, timestamps."
 (defun org-mode-google-tasks-sync-org-write-task (task)
   "Write TASK to the buffer position at TASK's marker, creating or updating fields.
 Preserves the existing TODO keyword and priority cookie when updating title."
+  (let ((m (org-mode-google-tasks-sync-org-task-marker task)))
+    (if (and m (marker-buffer m))
+        (with-current-buffer (marker-buffer m)
+          (org-mode-google-tasks-sync-org--write-task-1 task))
+      (org-mode-google-tasks-sync-org--write-task-1 task))))
+
+(defun org-mode-google-tasks-sync-org--write-task-1 (task)
+  "Write TASK fields to the heading at point.
+Expects to be called in the correct org buffer with point at or near
+the target heading."
   (save-excursion
     (let ((m (org-mode-google-tasks-sync-org-task-marker task)))
       (when m (goto-char m)))
@@ -229,21 +239,22 @@ Preserves the property drawer and planning lines."
 (defun org-mode-google-tasks-sync-org-insert-task-under (parent-marker task)
   "Insert TASK as a new child heading under the heading at PARENT-MARKER.
 Returns the marker of the new heading."
-  (save-excursion
-    (goto-char parent-marker)
-    (org-back-to-heading t)
-    (let ((parent-level (org-current-level)))
-      (org-end-of-subtree t t)
-      (unless (bolp) (insert "\n"))
-      (insert (make-string (1+ parent-level) ?*) " TODO "
-              (or (org-mode-google-tasks-sync-org-task-title task) "") "\n")
-      (let ((new-marker (save-excursion
-                          (forward-line -1)
-                          (point-marker))))
-        (setf (org-mode-google-tasks-sync-org-task-marker task) new-marker)
-        (goto-char new-marker)
-        (org-mode-google-tasks-sync-org-write-task task)
-        new-marker))))
+  (with-current-buffer (marker-buffer parent-marker)
+    (save-excursion
+      (goto-char parent-marker)
+      (org-back-to-heading t)
+      (let ((parent-level (org-current-level)))
+        (org-end-of-subtree t t)
+        (unless (bolp) (insert "\n"))
+        (insert (make-string (1+ parent-level) ?*) " TODO "
+                (or (org-mode-google-tasks-sync-org-task-title task) "") "\n")
+        (let ((new-marker (save-excursion
+                            (forward-line -1)
+                            (point-marker))))
+          (setf (org-mode-google-tasks-sync-org-task-marker task) new-marker)
+          (goto-char new-marker)
+          (org-mode-google-tasks-sync-org-write-task task)
+          new-marker)))))
 
 (defun org-mode-google-tasks-sync-org-collect-tasks-under (file parent-heading list-id)
   "Return all task structs that are direct children of PARENT-HEADING in FILE.

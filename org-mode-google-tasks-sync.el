@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: MIT
 
 ;; Author: Alexander Lehmann <afwlehmann@googlemail.com>
-;; Version: 0.2.2
+;; Version: 0.2.3
 ;; Package-Requires: ((emacs "27.1") (plz "0.7") (oauth2 "0.16") (org "9.5"))
 ;; Keywords: org, calendar, tools
 
@@ -413,10 +413,11 @@ survive."
                    (org-mode-google-tasks-sync-org-insert-task-under
                     parent-marker new-task)
                    (save-buffer))))
-             ;; Remove from trash.
-             (let ((begin (save-excursion (org-back-to-heading t) (point)))
-                   (end   (save-excursion (org-end-of-subtree t t) (point))))
-               (delete-region begin end))
+              ;; Remove from trash.
+              (with-current-buffer (org-mode-google-tasks-sync--trash-buffer)
+                (let ((begin (save-excursion (org-back-to-heading t) (point)))
+                      (end   (save-excursion (org-end-of-subtree t t) (point))))
+                  (delete-region begin end)))
              (org-mode-google-tasks-sync--trash-persist)
              (org-mode-google-tasks-sync-engine--log "Restored: %s" title)
              (message "Restored %S to %s" title source-file)))
