@@ -294,5 +294,104 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
                (list t "" "2026-06-27T08:00:00Z")
                (list t "" "2026-06-27T12:00:00Z"))))
 
+;;; -- Full-sync deletion sweep ------------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/sweep-deletes-absent-ids ()
+  "Full-sync sweep removes local tasks whose IDs are absent from the remote set."
+  (let ((file (make-temp-file "gtasks-sweep-absent" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Keep me\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: keep\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Delete me\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: drop\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (let* ((remote `((id . "keep")
+                           (title . "Keep me")
+                           (status . "needsAction")
+                           (updated . "2026-01-01T00:00:00.000Z"))))
+            ;; Stub out push helpers; they need a real token and network.
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                       (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
+                       (lambda (&rest _) t)))
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'full
+               (list remote)
+               #'ignore))))
+      (with-current-buffer (find-file-noselect file)
+        (goto-char (point-min))
+        (should (re-search-forward "Keep me" nil t))
+        (should-not (re-search-forward "Delete me" nil t))
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/sweep-snapshots-to-trash ()
+  "Engine-side deletion (sweep) snapshots the task to the trash buffer.
+Regression for the README/implementation mismatch: README claims
+engine deletions are recoverable, but the code never snapshotted."
+  (let ((file (make-temp-file "gtasks-sweep-trash" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Delete me\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: drop\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                     (lambda (&rest _) t))
+                    ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
+                     (lambda (&rest _) t)))
+            (org-mode-google-tasks-sync-engine--apply
+             nil "L" file "Tasks" 'full nil #'ignore)))
+      (with-current-buffer (get-buffer-create
+                            "*org-mode-google-tasks-sync-trash*")
+        (goto-char (point-min))
+        (should (re-search-forward "Delete me" nil t)))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file)
+      (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+        (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
+
+;;; -- showCompleted pinned in list-tasks query -------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/list-tasks-pins-showCompleted ()
+  "The list-tasks API call must pin showCompleted=true.
+Without it, Google may omit completed tasks from a complete response,
+and the full-sync deletion sweep would then nuke every local DONE
+heading — the 'items vanish on full sync' bug."
+  (let (captured-url)
+    (cl-letf (((symbol-function 'plz)
+               (lambda (_method url &rest keys)
+                 (setq captured-url url)
+                 (funcall (plist-get keys :then)
+                          '((items . nil) (nextPageToken . nil))))))
+      (org-mode-google-tasks-sync-api-list-tasks
+       (make-org-mode-google-tasks-sync-api-token
+        :access-token "fake")
+       "LIST-ID" nil #'ignore #'ignore))
+    (should captured-url)
+    (should (string-match-p "showCompleted=true" captured-url))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

@@ -300,7 +300,13 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
     (token list-id file parent mode remote-tasks done)
   "Reconcile REMOTE-TASKS against the local subtree under PARENT in FILE.
 Uses TOKEN for pushes.  LIST-ID is the Google Tasks list.
-MODE is `incremental' or `full'.  Calls DONE when finished."
+MODE is `incremental' or `full'.  Calls DONE when finished.
+
+In `full' mode, any local task whose ID is absent from the remote
+response is deleted via `--delete-local', which snapshots it to the
+trash buffer (recoverable via `org-mode-google-tasks-sync-restore-at-point')
+before removing the heading.  FILE is threaded through to
+`--reconcile-one' and the sweep so both deletion paths can snapshot."
   (setq org-mode-google-tasks-sync-engine--state 'applying)
   (with-current-buffer (find-file-noselect file)
     (let* ((local (org-mode-google-tasks-sync-org-collect-tasks-under file parent list-id))
@@ -314,12 +320,12 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
         (puthash (alist-get 'id r) r remote-by-id))
       (dolist (r (append remote-tasks nil))
         (org-mode-google-tasks-sync-engine--reconcile-one
-         token list-id parent-marker r local-by-id))
+         token list-id parent-marker r local-by-id file))
       (when (eq mode 'full)
         (maphash
          (lambda (id local-task)
            (unless (gethash id remote-by-id)
-             (org-mode-google-tasks-sync-engine--delete-local local-task)))
+             (org-mode-google-tasks-sync-engine--delete-local local-task file)))
          local-by-id))
       (dolist (l local)
         (unless (org-mode-google-tasks-sync-org-task-id l)
@@ -389,17 +395,18 @@ user would see no tasks despite a successful sync."
             mk)))))
 
 (defun org-mode-google-tasks-sync-engine--reconcile-one
-    (token list-id parent-marker remote local-by-id)
+    (token list-id parent-marker remote local-by-id file)
   "Apply the 4-cell matrix to REMOTE against the local task (if any).
 Uses TOKEN for pushes.  LIST-ID is the Google Tasks list.
 PARENT-MARKER is the org heading under which tasks live.
-LOCAL-BY-ID is a hash table of local tasks keyed by ID."
+LOCAL-BY-ID is a hash table of local tasks keyed by ID.
+FILE is the source file, passed to `--delete-local' for trash snapshots."
   (let* ((id (alist-get 'id remote))
          (deleted (alist-get 'deleted remote))
          (local (gethash id local-by-id)))
     (cond
      ((eq deleted t)
-      (when local (org-mode-google-tasks-sync-engine--delete-local local)))
+      (when local (org-mode-google-tasks-sync-engine--delete-local local file)))
      ((null local)
       (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
                     remote list-id nil)))
@@ -494,8 +501,16 @@ LOCAL-BY-ID is a hash table of local tasks keyed by ID."
                                         err
                                         (org-mode-google-tasks-sync-org-task-title task)))))
 
-(defun org-mode-google-tasks-sync-engine--delete-local (task)
-  "Remove TASK's heading from the buffer."
+(defun org-mode-google-tasks-sync-engine--delete-local (task &optional source-file)
+  "Remove TASK's heading from the buffer.
+Snapshots TASK to the trash buffer when SOURCE-FILE is given, so
+engine-side deletions (tombstones and the full-sync sweep) are
+recoverable via `org-mode-google-tasks-sync-restore-at-point' —
+matching what the README documents.  Interactive deletions go
+through `org-mode-google-tasks-sync-delete-at-point', which
+snapshots separately and leaves SOURCE-FILE nil here."
+  (when (and source-file (fboundp 'org-mode-google-tasks-sync--snapshot-to-trash))
+    (org-mode-google-tasks-sync--snapshot-to-trash task source-file))
   (when (org-mode-google-tasks-sync-org-task-marker task)
     (save-excursion
       (goto-char (org-mode-google-tasks-sync-org-task-marker task))

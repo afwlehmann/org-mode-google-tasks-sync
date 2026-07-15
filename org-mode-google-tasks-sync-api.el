@@ -95,9 +95,17 @@ Calls THEN with a list of task alists across all pages, ELSE on error."
   "Internal helper to fetch one page of tasks using TOKEN in LIST-ID.
 ARGS is an alist of query params.  Recurses via PAGE-TOKEN,
 accumulating into ACC, until done, then calls THEN with the full
-list or ELSE on error."
+list or ELSE on error.
+
+Base query params are pinned to `showCompleted=true',
+`showDeleted=true', and `showHidden=true'.  `showCompleted' must
+be explicit: without it, Google may omit completed tasks from a
+complete response, and the full-sync deletion sweep in `--apply'
+would then nuke every local DONE heading — the \"items vanish on
+full sync\" bug."
   (let* ((base-args `(("maxResults" . ,(number-to-string
                                          org-mode-google-tasks-sync-api--page-size))
+                      ("showCompleted" . "true")
                       ("showDeleted" . "true")
                       ("showHidden"  . "true")))
          (all-args (append base-args args
