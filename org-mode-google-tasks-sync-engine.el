@@ -97,21 +97,28 @@ that would be too noisy at the default `info' level."
 (defun org-mode-google-tasks-sync-engine--remote-task->struct (remote list-id existing-marker)
   "Build a task struct from a REMOTE alist in LIST-ID.
 Carries EXISTING-MARKER if known."
-  (make-org-mode-google-tasks-sync-org-task
-   :id        (alist-get 'id remote)
-   :list-id   list-id
-   :title     (or (alist-get 'title remote) "")
-   :notes     (or (alist-get 'notes remote) "")
-   :status    (if (equal (alist-get 'status remote) "completed")
-                  'completed 'needsAction)
-   :due       (org-mode-google-tasks-sync-engine--remote-due remote)
-   :parent-id (alist-get 'parent remote)
-   :updated   (alist-get 'updated remote)
-   :etag      (alist-get 'etag remote)
-   :hash      nil
-   :position  (alist-get 'position remote)
-   :completed (alist-get 'completed remote)
-   :marker    existing-marker))
+  (let* ((links-raw (alist-get 'links remote))
+         (links-json (when links-raw
+                       (json-serialize links-raw
+                                       :null-object nil
+                                       :false-object :false))))
+    (make-org-mode-google-tasks-sync-org-task
+     :id        (alist-get 'id remote)
+     :list-id   list-id
+     :title     (or (alist-get 'title remote) "")
+     :notes     (or (alist-get 'notes remote) "")
+     :status    (if (equal (alist-get 'status remote) "completed")
+                    'completed 'needsAction)
+     :due       (org-mode-google-tasks-sync-engine--remote-due remote)
+     :parent-id (alist-get 'parent remote)
+     :updated   (alist-get 'updated remote)
+     :etag      (alist-get 'etag remote)
+     :hash      nil
+     :position  (alist-get 'position remote)
+     :completed (alist-get 'completed remote)
+     :links     links-json
+     :web-view-link (alist-get 'webViewLink remote)
+     :marker    existing-marker)))
 
 (defun org-mode-google-tasks-sync-engine--remote-due (remote)
   "Extract YYYY-MM-DD from the REMOTE task's `due' RFC3339 string."

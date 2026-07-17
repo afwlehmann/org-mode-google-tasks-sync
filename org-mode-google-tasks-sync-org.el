@@ -42,6 +42,15 @@ Used as a secondary sort key so DONE entries land in
 most-recently-completed-first order.  Not in the canonical hash;
 status (which IS in the hash) covers the meaningful state change.")
 
+(defconst org-mode-google-tasks-sync-org--prop-links "GTASK_LINKS"
+  "Property holding the server `links' array as a JSON string.
+Read-only display metadata populated by Gmail, Keep, Chat, Docs.
+Not in the canonical hash; not pushable via the Tasks API.")
+
+(defconst org-mode-google-tasks-sync-org--prop-web-view-link "GTASK_WEB_LINK"
+  "Property holding the server `webViewLink' URL to the task in Google's web UI.
+Read-only display metadata.  Not in the canonical hash; not pushable.")
+
 (cl-defstruct org-mode-google-tasks-sync-org-task
   "In-memory representation of a synced task heading."
   id            ; string or nil for unsynced local tasks
@@ -56,6 +65,8 @@ status (which IS in the hash) covers the meaningful state change.")
   hash          ; canonical content hash at last sync, or nil
   position      ; string from server (lexicographic rank), or nil
   completed     ; string RFC3339 from server for DONE tasks, or nil
+  links         ; string JSON-encoded links array from server, or nil
+  web-view-link ; string URL to task in Google web UI, or nil
   marker)       ; buffer marker pointing at the heading, or nil
 
 (defun org-mode-google-tasks-sync-org--priority-cookie-re ()
@@ -126,12 +137,14 @@ until neither prefix matches."
        :status    (org-mode-google-tasks-sync-org--todo-state element)
        :due       (org-mode-google-tasks-sync-org--headline-due element)
        :parent-id nil
-       :updated   (org-entry-get nil org-mode-google-tasks-sync-org--prop-updated)
-       :etag      (org-entry-get nil org-mode-google-tasks-sync-org--prop-etag)
-       :hash      (org-entry-get nil org-mode-google-tasks-sync-org--prop-hash)
-       :position  (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)
-       :completed (org-entry-get nil org-mode-google-tasks-sync-org--prop-completed)
-       :marker    (point-marker)))))
+        :updated   (org-entry-get nil org-mode-google-tasks-sync-org--prop-updated)
+        :etag      (org-entry-get nil org-mode-google-tasks-sync-org--prop-etag)
+        :hash      (org-entry-get nil org-mode-google-tasks-sync-org--prop-hash)
+        :position  (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)
+        :completed (org-entry-get nil org-mode-google-tasks-sync-org--prop-completed)
+        :links     (org-entry-get nil org-mode-google-tasks-sync-org--prop-links)
+        :web-view-link (org-entry-get nil org-mode-google-tasks-sync-org--prop-web-view-link)
+        :marker    (point-marker)))))
 
 (defun org-mode-google-tasks-sync-org-canonical-hash (task)
   "Return a stable SHA-1 hash over the synced fields of TASK.
@@ -193,6 +206,12 @@ the target heading."
     (when (org-mode-google-tasks-sync-org-task-completed task)
       (org-entry-put nil org-mode-google-tasks-sync-org--prop-completed
                      (org-mode-google-tasks-sync-org-task-completed task)))
+    (when (org-mode-google-tasks-sync-org-task-links task)
+      (org-entry-put nil org-mode-google-tasks-sync-org--prop-links
+                     (org-mode-google-tasks-sync-org-task-links task)))
+    (when (org-mode-google-tasks-sync-org-task-web-view-link task)
+      (org-entry-put nil org-mode-google-tasks-sync-org--prop-web-view-link
+                     (org-mode-google-tasks-sync-org-task-web-view-link task)))
     (org-entry-put nil org-mode-google-tasks-sync-org--prop-hash
                    (org-mode-google-tasks-sync-org-canonical-hash task))))
 

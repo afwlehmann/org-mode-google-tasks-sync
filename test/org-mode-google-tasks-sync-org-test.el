@@ -128,13 +128,60 @@ Some body text here.
 
 (ert-deftest org-mode-google-tasks-sync-org-test/hash-independent-of-id-and-etag ()
   (let ((t1 (make-org-mode-google-tasks-sync-org-task
-             :title "Buy milk" :status 'needsAction
-             :id "abc" :etag "e1" :updated "2026-06-27T00:00:00Z"))
-        (t2 (make-org-mode-google-tasks-sync-org-task
-             :title "Buy milk" :status 'needsAction
-             :id "xyz" :etag "e9" :updated "9999-12-31T23:59:59Z")))
+              :title "Buy milk" :status 'needsAction
+              :id "abc" :etag "e1" :updated "2026-06-27T00:00:00Z"))
+         (t2 (make-org-mode-google-tasks-sync-org-task
+              :title "Buy milk" :status 'needsAction
+              :id "xyz" :etag "e9" :updated "9999-12-31T23:59:59Z")))
     (should (equal (org-mode-google-tasks-sync-org-canonical-hash t1)
                    (org-mode-google-tasks-sync-org-canonical-hash t2)))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/hash-independent-of-links ()
+  "Links and webViewLink are display metadata; they don't affect the content hash.
+Regression guard: if someone accidentally adds them to the hash, existing
+tasks would get spurious 'local-changed' detections on every pull."
+  (let ((t1 (make-org-mode-google-tasks-sync-org-task
+              :title "Buy milk" :status 'needsAction))
+        (t2 (make-org-mode-google-tasks-sync-org-task
+              :title "Buy milk" :status 'needsAction
+              :links "[{\"type\":\"email\",\"link\":\"https://mail.google.com/x\"}]"
+              :web-view-link "https://tasks.googleapis.com/abc")))
+    (should (equal (org-mode-google-tasks-sync-org-canonical-hash t1)
+                   (org-mode-google-tasks-sync-org-canonical-hash t2)))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/write-task-writes-link-properties ()
+  "`write-task' writes :GTASK_LINKS: and :GTASK_WEB_LINK: into the property drawer
+when the struct carries them."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* TODO Buy milk\n"
+    (re-search-forward "^\\*+ ")
+    (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      (setf (org-mode-google-tasks-sync-org-task-links task)
+            "[{\"type\":\"email\",\"link\":\"https://mail.google.com/foo\"}]")
+      (setf (org-mode-google-tasks-sync-org-task-web-view-link task)
+            "https://tasks.googleapis.com/tasks/v1/abc")
+      (org-mode-google-tasks-sync-org-write-task task))
+    (should (equal "[{\"type\":\"email\",\"link\":\"https://mail.google.com/foo\"}]"
+                   (org-entry-get nil "GTASK_LINKS")))
+    (should (equal "https://tasks.googleapis.com/tasks/v1/abc"
+                   (org-entry-get nil "GTASK_WEB_LINK")))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/read-task-round-trips-link-properties ()
+  "Link properties written by `write-task' are read back by `read-task-at-point'."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* TODO Buy milk\n"
+    (re-search-forward "^\\*+ ")
+    (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      (setf (org-mode-google-tasks-sync-org-task-links task)
+            "[{\"type\":\"email\",\"link\":\"https://mail.google.com/foo\"}]")
+      (setf (org-mode-google-tasks-sync-org-task-web-view-link task)
+            "https://tasks.googleapis.com/tasks/v1/abc")
+      (org-mode-google-tasks-sync-org-write-task task))
+    (let ((read-back (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      (should (equal "[{\"type\":\"email\",\"link\":\"https://mail.google.com/foo\"}]"
+                     (org-mode-google-tasks-sync-org-task-links read-back)))
+      (should (equal "https://tasks.googleapis.com/tasks/v1/abc"
+                     (org-mode-google-tasks-sync-org-task-web-view-link read-back))))))
 
 (ert-deftest org-mode-google-tasks-sync-org-test/collect-tasks-under-parent ()
   (let ((file (make-temp-file "gtasks-test" nil ".org")))

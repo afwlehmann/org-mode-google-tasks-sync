@@ -92,6 +92,33 @@ remote task."
          (task (org-mode-google-tasks-sync-engine--remote-task->struct remote "L1" nil)))
     (should (null (org-mode-google-tasks-sync-org-task-due task)))))
 
+(ert-deftest org-mode-google-tasks-sync-engine-test/remote->struct-extracts-links ()
+  "`--remote-task->struct' picks up `links' and `webViewLink' from the remote response.
+The `links' array is JSON-serialized for storage in the property drawer;
+`webViewLink' is stored as a plain string.  Both are read-only display
+metadata — never in the canonical hash, never in the push payload."
+  (let* ((remote `((id . "abc")
+                   (title . "Task with links")
+                   (status . "needsAction")
+                   (links . [((type . "email")
+                              (description . "Related email")
+                              (link . "https://mail.google.com/foo"))])
+                   (webViewLink . "https://tasks.googleapis.com/tasks/v1/abc")))
+         (task (org-mode-google-tasks-sync-engine--remote-task->struct remote "L" nil)))
+    (should (org-mode-google-tasks-sync-org-task-links task))
+    (should (string-match-p "Related email" (org-mode-google-tasks-sync-org-task-links task)))
+    (should (string-match-p "https://mail.google.com/foo"
+                            (org-mode-google-tasks-sync-org-task-links task)))
+    (should (equal "https://tasks.googleapis.com/tasks/v1/abc"
+                   (org-mode-google-tasks-sync-org-task-web-view-link task)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/remote->struct-no-links ()
+  "When the remote response has no `links' or `webViewLink', the struct slots are nil."
+  (let* ((remote '((id . "x") (title . "Plain") (status . "needsAction")))
+         (task (org-mode-google-tasks-sync-engine--remote-task->struct remote "L" nil)))
+    (should (null (org-mode-google-tasks-sync-org-task-links task)))
+    (should (null (org-mode-google-tasks-sync-org-task-web-view-link task)))))
+
 ;;; -- Struct → API payload ---------------------------------------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/task->api-data-basic ()
@@ -115,6 +142,16 @@ remote task."
                  :title "Buy milk" :status 'completed))
           (data (org-mode-google-tasks-sync-engine--task->api-data task)))
     (should (equal "completed" (alist-get 'status data)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/task->api-data-omits-links ()
+  "Links and webViewLink are read-only; the push payload never includes them."
+  (let* ((task (make-org-mode-google-tasks-sync-org-task
+                :title "Buy milk" :status 'needsAction
+                :links "[{\"type\":\"email\"}]"
+                :web-view-link "https://tasks.googleapis.com/abc"))
+         (data (org-mode-google-tasks-sync-engine--task->api-data task)))
+    (should-not (assoc 'links data))
+    (should-not (assoc 'webViewLink data))))
 
 ;;; -- Non-ASCII encoding ------------------------------------------------------
 

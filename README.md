@@ -31,6 +31,8 @@ This package syncs **Google Tasks only** — not Google Calendar events.
 | Subtask nesting (one level) | ✅ ↔ Google `parent` |
 | `[#A]` / `[#B]` / `[#C]` priority cookies | ❌ Local-only — stripped from title on push, preserved on pull |
 | Tag ordering / `position` | ❌ Not synced in v1 |
+| Links / attachments (`links[]`, `webViewLink`) | 📖 Read-only display — populated by Gmail/Keep/Chat/Docs; stored as `:GTASK_LINKS:` / `:GTASK_WEB_LINK:` properties.  Not pushable via the API. |
+| Starred | ❌ No `starred` field in the Tasks API v1 |
 | Recurring tasks | ❌ Google Tasks API is read-only for recurrence |
 | `DEADLINE:` | ❌ Only `SCHEDULED:` maps to Google's `due` |
 
@@ -176,6 +178,10 @@ Heading properties written by the package:
 | `:GTASK_UPDATED:` | The `updated` timestamp from Google's last response for this task. Server-authoritative; never compared to local clock. |
 | `:GTASK_ETAG:` | The ETag from Google's last response. Sent as `If-Match` on PATCH; on 412 mismatch the task is re-fetched and conflict resolution re-runs. |
 | `:GTASK_CONTENT_HASH:` | SHA-1 over a canonical projection of (title, notes, status, due). Stable across whitespace and property-drawer churn. Compared on every tick to detect local edits since the last sync. |
+| `:GTASK_POSITION:` | Server `position` lexicographic-rank string. Used for sorting; not in the hash. |
+| `:GTASK_COMPLETED:` | Server `completed` RFC3339 timestamp. Sort key for DONE tasks; not in the hash. |
+| `:GTASK_LINKS:` | Server `links[]` array, JSON-encoded. Read-only display metadata populated by Gmail/Keep/Chat/Docs. Not in the hash; not pushable. |
+| `:GTASK_WEB_LINK:` | Server `webViewLink` URL to the task in Google's web UI. Read-only display metadata; not in the hash; not pushable. |
 
 ---
 
