@@ -257,6 +257,8 @@ Preserves the property drawer and planning lines."
 
 (defun org-mode-google-tasks-sync-org-insert-task-under (parent-marker task)
   "Insert TASK as a new child heading under the heading at PARENT-MARKER.
+PARENT-MARKER may point at the configured parent heading (for
+top-level tasks) or at any synced task heading (for subtasks).
 Returns the marker of the new heading."
   (with-current-buffer (marker-buffer parent-marker)
     (save-excursion
@@ -275,9 +277,39 @@ Returns the marker of the new heading."
           (org-mode-google-tasks-sync-org-write-task task)
           new-marker)))))
 
+(defun org-mode-google-tasks-sync-org-find-marker-by-gtask-id (file gtask-id)
+  "Return the marker of the heading in FILE with :GTASK_ID: GTASK-ID, or nil."
+  (when gtask-id
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (goto-char (point-min))
+        (catch 'found
+          (while (re-search-forward org-heading-regexp nil t)
+            (when (equal (org-entry-get nil org-mode-google-tasks-sync-org--prop-id)
+                         gtask-id)
+              (throw 'found (point-marker))))
+          nil)))))
+
+(defun org-mode-google-tasks-sync-org--parent-id-at-point ()
+  "Return the GTASK_ID of the parent heading of the heading at point, or nil.
+Used to infer the Google `parent' field from the org heading hierarchy
+rather than storing a separate :GTASK_PARENT: property.  Returns nil
+when the heading at point is a direct child of the configured parent
+heading (i.e. a top-level task) or when the parent heading has no
+:GTASK_ID:."
+  (save-excursion
+    (org-back-to-heading t)
+    (when (org-up-heading-safe)
+      (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))))
+
 (defun org-mode-google-tasks-sync-org-collect-tasks-under (file parent-heading list-id)
-  "Return all task structs that are direct children of PARENT-HEADING in FILE.
-LIST-ID is attached to each returned task."
+  "Return all task structs under PARENT-HEADING in FILE, up to 2 levels deep.
+LIST-ID is attached to each returned task.  Direct children
+\(level parent+1) are top-level tasks; their children (level parent+2)
+are subtasks.  Each task's `parent-id' slot is inferred from the org
+heading hierarchy: if the immediate parent heading has a :GTASK_ID:,
+that's the parent-id; otherwise nil (top-level).  Headings at level
+parent+3 or deeper are local-only and not collected."
   (with-current-buffer (find-file-noselect file)
     (save-excursion
       (goto-char (point-min))
@@ -289,8 +321,12 @@ LIST-ID is attached to each returned task."
                         (or (not (looking-at "^\\*+ "))
                             (> (org-current-level) parent-level)))
               (when (and (looking-at "^\\*+ ")
-                         (= (org-current-level) (1+ parent-level)))
-                (push (org-mode-google-tasks-sync-org-read-task-at-point list-id) tasks))
+                         (<= (org-current-level) (+ 2 parent-level))
+                         (> (org-current-level) parent-level))
+                (let ((task (org-mode-google-tasks-sync-org-read-task-at-point list-id)))
+                  (setf (org-mode-google-tasks-sync-org-task-parent-id task)
+                        (org-mode-google-tasks-sync-org--parent-id-at-point))
+                  (push task tasks)))
               (forward-line 1))))
         (nreverse tasks)))))
 

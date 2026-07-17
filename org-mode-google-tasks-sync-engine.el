@@ -309,23 +309,35 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
 Uses TOKEN for pushes.  LIST-ID is the Google Tasks list.
 MODE is `incremental' or `full'.  Calls DONE when finished.
 
-In `full' mode, any local task whose ID is absent from the remote
-response is deleted via `--delete-local', which snapshots it to the
-trash buffer (recoverable via `org-mode-google-tasks-sync-restore-at-point')
-before removing the heading.  FILE is threaded through to
-`--reconcile-one' and the sweep so both deletion paths can snapshot."
+Remote tasks are processed in two passes: top-level tasks first
+\(no `parent' field), then subtasks (has `parent').  This ensures
+parent headings exist locally before children are inserted under
+them.  In `full' mode, any local task whose ID is absent from the
+remote response is deleted via `--delete-local', which snapshots it
+to the trash buffer (recoverable via
+`org-mode-google-tasks-sync-restore-at-point') before removing the
+heading.  FILE is threaded through to `--reconcile-one' and the
+sweep so both deletion paths can snapshot."
   (setq org-mode-google-tasks-sync-engine--state 'applying)
   (with-current-buffer (find-file-noselect file)
     (let* ((local (org-mode-google-tasks-sync-org-collect-tasks-under file parent list-id))
            (local-by-id (make-hash-table :test 'equal))
            (remote-by-id (make-hash-table :test 'equal))
-           (parent-marker (org-mode-google-tasks-sync-engine--parent-marker file parent)))
+           (parent-marker (org-mode-google-tasks-sync-engine--parent-marker file parent))
+           (remote-list (append remote-tasks nil))
+           (top-level (cl-remove-if (lambda (r) (alist-get 'parent r)) remote-list))
+           (subtasks (cl-remove-if-not (lambda (r) (alist-get 'parent r)) remote-list)))
       (dolist (l local)
         (when (org-mode-google-tasks-sync-org-task-id l)
           (puthash (org-mode-google-tasks-sync-org-task-id l) l local-by-id)))
-      (dolist (r (append remote-tasks nil))
+      (dolist (r remote-list)
         (puthash (alist-get 'id r) r remote-by-id))
-      (dolist (r (append remote-tasks nil))
+      ;; Pass 1: top-level tasks (no parent).
+      (dolist (r top-level)
+        (org-mode-google-tasks-sync-engine--reconcile-one
+         token list-id parent-marker r local-by-id file))
+      ;; Pass 2: subtasks (has parent) — parent headings now exist.
+      (dolist (r subtasks)
         (org-mode-google-tasks-sync-engine--reconcile-one
          token list-id parent-marker r local-by-id file))
       (when (eq mode 'full)
@@ -336,7 +348,7 @@ before removing the heading.  FILE is threaded through to
          local-by-id))
       (dolist (l local)
         (unless (org-mode-google-tasks-sync-org-task-id l)
-          (org-mode-google-tasks-sync-engine--push-new token list-id l)))
+          (org-mode-google-tasks-sync-engine--push-new token list-id l file)))
       (org-mode-google-tasks-sync-engine--sort-children parent-marker)
       (org-mode-google-tasks-sync-engine--set-last-sync
        file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
@@ -366,19 +378,37 @@ completed timestamp descending (newest first)."
 
 (defun org-mode-google-tasks-sync-engine--sort-children (parent-marker)
   "Sort children of PARENT-MARKER by `--task-sort-key' / `--compare-tasks'.
-Returns silently when PARENT-MARKER is nil or points at no heading."
+Sorts direct children, then recurses into each child's subtree so
+subtasks are also ordered.  Returns silently when PARENT-MARKER is
+nil or points at no heading."
   (when (and parent-marker (marker-buffer parent-marker))
     (with-current-buffer (marker-buffer parent-marker)
       (save-excursion
         (goto-char parent-marker)
         (when (org-at-heading-p)
-          (condition-case err
-              (org-sort-entries nil ?f
-                                #'org-mode-google-tasks-sync-engine--task-sort-key
-                                #'org-mode-google-tasks-sync-engine--compare-tasks)
-            (error
-             (org-mode-google-tasks-sync-engine--log
-              "Sort skipped: %S" err))))))))
+          (org-mode-google-tasks-sync-engine--sort-subtree-at-point))))))
+
+(defun org-mode-google-tasks-sync-engine--sort-subtree-at-point ()
+  "Sort the children of the heading at point, then recurse into each child.
+Children are sorted by `--task-sort-key' / `--compare-tasks'."
+  (condition-case err
+      (org-sort-entries nil ?f
+                        #'org-mode-google-tasks-sync-engine--task-sort-key
+                        #'org-mode-google-tasks-sync-engine--compare-tasks)
+    (error
+     (org-mode-google-tasks-sync-engine--log
+      "Sort skipped: %S" err)))
+  ;; Recurse into each direct child.
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((parent-level (org-current-level)))
+      (forward-line 1)
+      (while (and (not (eobp))
+                  (looking-at "^\\*+ ")
+                  (= (org-current-level) (1+ parent-level)))
+        (org-mode-google-tasks-sync-engine--sort-subtree-at-point)
+        (org-back-to-heading t)
+        (forward-line 1)))))
 
 (defun org-mode-google-tasks-sync-engine--parent-marker (file parent)
   "Return marker of PARENT heading in FILE, creating the heading if absent.
@@ -405,11 +435,16 @@ user would see no tasks despite a successful sync."
     (token list-id parent-marker remote local-by-id file)
   "Apply the 4-cell matrix to REMOTE against the local task (if any).
 Uses TOKEN for pushes.  LIST-ID is the Google Tasks list.
-PARENT-MARKER is the org heading under which tasks live.
+PARENT-MARKER is the org heading under which top-level tasks live.
 LOCAL-BY-ID is a hash table of local tasks keyed by ID.
-FILE is the source file, passed to `--delete-local' for trash snapshots."
+FILE is the source file, passed to `--delete-local' for trash snapshots.
+
+When REMOTE has a `parent' field, the task is a subtask: it is
+inserted under the local heading whose :GTASK_ID: matches the
+remote `parent', not under PARENT-MARKER."
   (let* ((id (alist-get 'id remote))
          (deleted (alist-get 'deleted remote))
+         (remote-parent (alist-get 'parent remote))
          (local (gethash id local-by-id)))
     (cond
      ((eq deleted t)
@@ -417,11 +452,62 @@ FILE is the source file, passed to `--delete-local' for trash snapshots."
      ((null local)
       (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
                     remote list-id nil)))
-        (when parent-marker
-          (org-mode-google-tasks-sync-org-insert-task-under parent-marker task)
-          (org-mode-google-tasks-sync-engine--log "Pulled new: %s"
-                                             (org-mode-google-tasks-sync-org-task-title task)))))
+        ;; For subtasks, insert under the parent task's heading, not
+        ;; the configured parent heading.  Look up by :GTASK_ID:.
+        (let ((insert-marker
+               (if remote-parent
+                   (or (when (gethash remote-parent local-by-id)
+                         (org-mode-google-tasks-sync-org-task-marker
+                          (gethash remote-parent local-by-id)))
+                       (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
+                        file remote-parent))
+                 parent-marker)))
+          (when insert-marker
+            (org-mode-google-tasks-sync-org-insert-task-under insert-marker task)
+            (org-mode-google-tasks-sync-engine--log "Pulled new: %s"
+                                               (org-mode-google-tasks-sync-org-task-title task))))))
      (t
+      (progn
+       (let* ((local-parent (org-mode-google-tasks-sync-org-task-parent-id local))
+              (parent-changed (not (equal remote-parent local-parent))))
+        (when parent-changed
+          ;; Reparenting detected.  Resolve: if remote changed (remote
+          ;; `updated' differs from stored), remote wins — move the
+          ;; local heading under the remote's parent.  If local moved
+          ;; (local file mtime is newer), push via tasks.move.
+          (let* ((remote-changed (not (equal
+                                       (alist-get 'updated remote)
+                                       (org-mode-google-tasks-sync-org-task-updated local))))
+                 (local-mtime (and (org-mode-google-tasks-sync-org-task-marker local)
+                                   (org-mode-google-tasks-sync-engine--marker-mtime
+                                    (org-mode-google-tasks-sync-org-task-marker local))))
+                 (remote-newer (org-mode-google-tasks-sync-engine--remote-newer-p
+                                local-mtime (alist-get 'updated remote))))
+            (cond
+             ((and remote-changed remote-newer)
+              ;; Remote reparented; move local heading under the new parent.
+              (org-mode-google-tasks-sync-engine--move-local-heading
+               local remote-parent file)
+              (org-mode-google-tasks-sync-engine--log
+               "Reparented (remote): %s -> parent=%s"
+               (org-mode-google-tasks-sync-org-task-title local)
+               (or remote-parent "<top-level>")))
+             (t
+              ;; Local reparented; push to Google via tasks.move.
+              (org-mode-google-tasks-sync-api-move-task
+               token list-id id
+               (lambda (resp)
+                 (setf (org-mode-google-tasks-sync-org-task-updated local)
+                       (alist-get 'updated resp))
+                 (org-mode-google-tasks-sync-engine--log
+                  "Reparented (local push): %s -> parent=%s"
+                  (org-mode-google-tasks-sync-org-task-title local)
+                  (or local-parent "<top-level>")))
+               (lambda (err)
+                 (org-mode-google-tasks-sync-engine--log
+                  "Reparent push error: %S (task=%s)"
+                  err (org-mode-google-tasks-sync-org-task-title local)))
+               local-parent))))))
       (let* ((local-changed (not (equal
                                   (org-mode-google-tasks-sync-org-canonical-hash local)
                                   (org-mode-google-tasks-sync-org-task-hash local))))
@@ -441,11 +527,11 @@ FILE is the source file, passed to `--delete-local' for trash snapshots."
           ('conflict-remote-wins
            (org-mode-google-tasks-sync-engine--quarantine "local-overwritten" local)
            (org-mode-google-tasks-sync-engine--apply-pull list-id local remote))
-          ('conflict-local-wins
-           (org-mode-google-tasks-sync-engine--quarantine
-            "remote-overwritten"
-            (org-mode-google-tasks-sync-engine--remote-task->struct remote list-id nil))
-           (org-mode-google-tasks-sync-engine--push-update token list-id local))))))))
+           ('conflict-local-wins
+            (org-mode-google-tasks-sync-engine--quarantine
+             "remote-overwritten"
+             (org-mode-google-tasks-sync-engine--remote-task->struct remote list-id nil))
+            (org-mode-google-tasks-sync-engine--push-update token list-id local)))))))))
 
 (defun org-mode-google-tasks-sync-engine--marker-mtime (marker)
   "Return `float-time' of the file backing MARKER, or nil."
@@ -453,6 +539,58 @@ FILE is the source file, passed to `--delete-local' for trash snapshots."
     (when (and buf (buffer-file-name buf))
       (let ((attrs (file-attributes (buffer-file-name buf))))
         (when attrs (float-time (file-attribute-modification-time attrs)))))))
+
+(defun org-mode-google-tasks-sync-engine--move-local-heading (task new-parent-id file)
+  "Move TASK's org heading under the heading with :GTASK_ID: NEW-PARENT-ID.
+When NEW-PARENT-ID is nil, move to top level (under the configured
+parent heading).  FILE is the source file, used to find the new
+parent's heading marker."
+  (when (org-mode-google-tasks-sync-org-task-marker task)
+    (let ((dest-marker
+           (if new-parent-id
+               (org-mode-google-tasks-sync-org-find-marker-by-gtask-id file new-parent-id)
+             (org-mode-google-tasks-sync-engine--parent-marker file
+              (or (cdr (assoc (org-mode-google-tasks-sync-org-task-list-id task)
+                              org-mode-google-tasks-sync-map
+                              ;; fall back to first entry's parent
+                              ))
+                  (cdar org-mode-google-tasks-sync-map))))))
+      (when dest-marker
+        (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
+          (save-excursion
+            (goto-char (org-mode-google-tasks-sync-org-task-marker task))
+            (org-back-to-heading t)
+            (let* ((begin (point))
+                   (end (save-excursion (org-end-of-subtree t t) (point)))
+                   (subtree-text (buffer-substring begin end))
+                   (old-level (org-current-level)))
+              (delete-region begin end)
+              (with-current-buffer (marker-buffer dest-marker)
+                (save-excursion
+                  (goto-char dest-marker)
+                  (org-back-to-heading t)
+                  (let ((new-level (1+ (org-current-level))))
+                    (org-end-of-subtree t t)
+                    (unless (bolp) (insert "\n"))
+                    (let ((adjusted
+                           (org-mode-google-tasks-sync-engine--adjust-heading-level
+                            subtree-text old-level new-level)))
+                      (insert adjusted))))))))))))
+
+(defun org-mode-google-tasks-sync-engine--adjust-heading-level (text old-level new-level)
+  "Adjust the heading level stars in TEXT from OLD-LEVEL to NEW-LEVEL."
+  (let ((diff (- new-level old-level)))
+    (if (= diff 0)
+        text
+      (with-temp-buffer
+        (insert text)
+        (goto-char (point-min))
+        (while (re-search-forward "^\\(\\*+\\) " nil t)
+          (let ((stars (match-string 1)))
+            (replace-match
+             (concat (make-string (max 1 (+ (length stars) diff)) ?*) " ")
+             nil t)))
+        (buffer-string)))))
 
 (defun org-mode-google-tasks-sync-engine--apply-pull (list-id local remote)
   "Apply REMOTE fields onto LOCAL task struct in LIST-ID in-buffer."
@@ -487,26 +625,32 @@ FILE is the source file, passed to `--delete-local' for trash snapshots."
                                         err
                                         (org-mode-google-tasks-sync-org-task-title task)))))
 
-(defun org-mode-google-tasks-sync-engine--push-new (token list-id task)
-  "POST a new TASK to Google in LIST-ID using TOKEN."
-  (org-mode-google-tasks-sync-api-insert-task
-   token list-id
-   (org-mode-google-tasks-sync-engine--task->api-data task)
-    (lambda (resp)
-      (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
-      (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
-      (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
-      (when (org-mode-google-tasks-sync-org-task-marker task)
-        (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
-          (save-excursion
-            (goto-char (org-mode-google-tasks-sync-org-task-marker task))
-            (org-mode-google-tasks-sync-org-write-task task))))
-      (org-mode-google-tasks-sync-engine--log "Pushed new: %s"
+(defun org-mode-google-tasks-sync-engine--push-new (token list-id task &optional file)
+  "POST a new TASK to Google in LIST-ID using TOKEN.
+When FILE is given and TASK has a `parent-id', pass it as the `parent'
+query param to `tasks.insert' so Google knows the nesting."
+  (let* ((parent-id (org-mode-google-tasks-sync-org-task-parent-id task))
+         (insert-args (when (and file parent-id)
+                        `(("parent" . ,parent-id)))))
+    (org-mode-google-tasks-sync-api-insert-task
+     token list-id
+     (org-mode-google-tasks-sync-engine--task->api-data task)
+     (lambda (resp)
+       (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
+       (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
+       (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
+       (when (org-mode-google-tasks-sync-org-task-marker task)
+         (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
+           (save-excursion
+             (goto-char (org-mode-google-tasks-sync-org-task-marker task))
+             (org-mode-google-tasks-sync-org-write-task task))))
+       (org-mode-google-tasks-sync-engine--log "Pushed new: %s"
+                                          (org-mode-google-tasks-sync-org-task-title task)))
+     (lambda (err)
+       (org-mode-google-tasks-sync-engine--log "Insert error: %S (task=%s)"
+                                         err
                                          (org-mode-google-tasks-sync-org-task-title task)))
-   (lambda (err)
-     (org-mode-google-tasks-sync-engine--log "Insert error: %S (task=%s)"
-                                        err
-                                        (org-mode-google-tasks-sync-org-task-title task)))))
+     insert-args)))
 
 (defun org-mode-google-tasks-sync-engine--delete-local (task &optional source-file)
   "Remove TASK's heading from the buffer.
@@ -517,7 +661,12 @@ matching what the README documents.  Interactive deletions go
 through `org-mode-google-tasks-sync-delete-at-point', which
 snapshots separately and leaves SOURCE-FILE nil here."
   (when (and source-file (fboundp 'org-mode-google-tasks-sync--snapshot-to-trash))
-    (org-mode-google-tasks-sync--snapshot-to-trash task source-file))
+    (condition-case err
+        (org-mode-google-tasks-sync--snapshot-to-trash task source-file)
+      (error
+       (org-mode-google-tasks-sync-engine--log
+        "Trash snapshot failed (task=%s): %S"
+        (org-mode-google-tasks-sync-org-task-title task) err))))
   (when (org-mode-google-tasks-sync-org-task-marker task)
     (save-excursion
       (goto-char (org-mode-google-tasks-sync-org-task-marker task))

@@ -53,7 +53,7 @@ These hold throughout the codebase. Violating them produces silent data loss or 
 4. **All HTTP goes through `plz` with `:then`/`:else` callbacks.** Never `accept-process-output` to "wait" — that blocks the UI on the timer tick.
 5. **`org-mode-google-tasks-sync-engine--state` must be `'idle` before a tick starts work.** Re-entrant ticks are no-ops; a sync in flight must complete (success or failure) before another can begin.
 6. **Priority cookies (`[#A]`/`[#B]`/`[#C]`) are stripped from titles on push and preserved on pull.** `org-mode-google-tasks-sync-org--replace-title` rewrites only the title portion of a headline, keeping the TODO keyword and any priority prefix.
-7. **Only direct children of the configured parent heading are synced.** `collect-tasks-under` enforces this. Grandchildren and beyond stay local-only.
+7. **Direct children and one level of subtasks (2 levels max) are synced.** `collect-tasks-under` walks the subtree under the configured parent heading up to 2 levels deep. Headings at level 3+ are local-only. Each task's `parent-id` is inferred from the org heading hierarchy (not a separate property): `org-up-heading-safe` + `org-entry-get :GTASK_ID:`.
 8. **Secrets never get written directly to `~/.authinfo.gpg`.** Always go through `auth-source-search :create t` and call the returned `:save-function`. Bypassing this breaks the macOS Keychain / pass backends.
 
 ## The 4-cell conflict matrix (the heart of the engine)
@@ -189,7 +189,7 @@ Example: suppose Google adds a `priority` field to the Tasks API. To wire it in:
 - **Don't add an external database.** State lives in the org file and `~/.authinfo.gpg`; if you find yourself wanting a sqlite, you've taken a wrong turn.
 - **Don't add a confirmation prompt for deletes.** The user explicitly chose auto-delete with logging.
 - **Don't introduce a new HTTP library.** `plz` is the choice.
-- **Don't sync more than one level of subtask nesting.** Google Tasks doesn't support it; emitting deeper nesting silently is misleading.
+- **Don't sync more than 2 levels of subtask nesting.** Google Tasks supports arbitrary nesting in the API, but the web UI only shows 2 levels. Syncing deeper would create confusing org trees. The 2-level limit is enforced in `collect-tasks-under`.
 - **Don't try to sync `position`.** v2 work; needs `tasks.move` calls and a tiebreak rule for ordering conflicts. Not in v1 scope.
 - **Don't add a verification flow for Google's "unverified app" warning.** Personal-use apps stay unverified by design.
 - **Don't read from `~/.authinfo.gpg` directly.** Always via `auth-source-search`.

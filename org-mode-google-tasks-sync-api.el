@@ -126,17 +126,24 @@ full sync\" bug."
                   (funcall then acc2))))
       :else else)))
 
-(defun org-mode-google-tasks-sync-api-insert-task (token list-id task-data then else)
+(defun org-mode-google-tasks-sync-api-insert-task (token list-id task-data then else &optional query-args)
   "POST TASK-DATA (alist) as a new task in LIST-ID using TOKEN.
-Call THEN with the response."
-  (plz 'post (concat org-mode-google-tasks-sync-api--base-url
-                     "/lists/" list-id "/tasks")
-    :headers (append (org-mode-google-tasks-sync-api--auth-header token)
-                     '(("Content-Type" . "application/json")))
-    :body (org-mode-google-tasks-sync-api--serialize-json task-data)
-    :as (lambda () (org-mode-google-tasks-sync-api--parse-json (buffer-string)))
-    :then then
-    :else else))
+Call THEN with the response.  Optional QUERY-ARGS is an alist of
+extra query params (e.g. `((\"parent\" . \"<id>\"))' to create
+a subtask under an existing task)."
+  (let* ((base-url (concat org-mode-google-tasks-sync-api--base-url
+                           "/lists/" list-id "/tasks"))
+         (url (if query-args
+                 (concat base-url "?"
+                         (org-mode-google-tasks-sync-api--query-string query-args))
+               base-url)))
+    (plz 'post url
+      :headers (append (org-mode-google-tasks-sync-api--auth-header token)
+                       '(("Content-Type" . "application/json")))
+      :body (org-mode-google-tasks-sync-api--serialize-json task-data)
+      :as (lambda () (org-mode-google-tasks-sync-api--parse-json (buffer-string)))
+      :then then
+      :else else)))
 
 (defun org-mode-google-tasks-sync-api-patch-task (token list-id task-id patch-data etag then else)
   "Update TASK-ID in LIST-ID using TOKEN with PATCH-DATA.
@@ -173,6 +180,25 @@ THEN is called with nil on success."
     :as (lambda () (org-mode-google-tasks-sync-api--parse-json (buffer-string)))
     :then then
     :else else))
+
+(defun org-mode-google-tasks-sync-api-move-task (token list-id task-id then else &optional new-parent-id)
+  "Move TASK-ID in LIST-ID using TOKEN to a new parent and/or position.
+NEW-PARENT-ID is the new parent task ID, or nil to move to top level.
+Calls THEN with the updated task; ELSE on error."
+  (let* ((base-url (concat org-mode-google-tasks-sync-api--base-url
+                           "/lists/" list-id "/tasks/" task-id "/move"))
+         (query-args (if new-parent-id
+                         `(("parent" . ,new-parent-id))
+                       nil))
+         (url (if query-args
+                  (concat base-url "?"
+                          (org-mode-google-tasks-sync-api--query-string query-args))
+                base-url)))
+    (plz 'post url
+      :headers (org-mode-google-tasks-sync-api--auth-header token)
+      :as (lambda () (org-mode-google-tasks-sync-api--parse-json (buffer-string)))
+      :then then
+      :else else)))
 
 (provide 'org-mode-google-tasks-sync-api)
 ;;; org-mode-google-tasks-sync-api.el ends here

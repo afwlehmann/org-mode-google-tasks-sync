@@ -184,6 +184,9 @@ when the struct carries them."
                      (org-mode-google-tasks-sync-org-task-web-view-link read-back))))))
 
 (ert-deftest org-mode-google-tasks-sync-org-test/collect-tasks-under-parent ()
+  "Collects direct children AND one level of subtasks (2 levels max).
+Level 3+ headings are NOT collected.  Each subtask's `parent-id' is
+inferred from the org heading hierarchy."
   (let ((file (make-temp-file "gtasks-test" nil ".org")))
     (unwind-protect
         (progn
@@ -193,16 +196,34 @@ when the struct carries them."
                     "** TODO Should not be collected\n"
                     "* Tasks\n"
                     "** TODO First task\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: first-id\n"
+                    "   :END:\n"
                     "** TODO Second task\n"
-                    "*** TODO Nested child (not direct)\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: second-id\n"
+                    "   :END:\n"
+                    "*** TODO Nested child (subtask of Second)\n"
+                    "    :PROPERTIES:\n"
+                    "    :GTASK_ID: nested-id\n"
+                    "    :END:\n"
+                    "**** Deeply nested (should NOT be collected)\n"
                     "** DONE Third task\n"))
           (let ((tasks (org-mode-google-tasks-sync-org-collect-tasks-under
                         file "Tasks" "L1")))
-            (should (= 3 (length tasks)))
-            (should (equal '("First task" "Second task" "Third task")
+            ;; 4 tasks: First, Second, Nested child, Third.
+            ;; The level-4 heading is NOT collected.
+            (should (= 4 (length tasks)))
+            (should (equal '("First task" "Second task" "Nested child (subtask of Second)" "Third task")
                            (mapcar #'org-mode-google-tasks-sync-org-task-title tasks)))
             (should (eq 'completed
-                        (org-mode-google-tasks-sync-org-task-status (nth 2 tasks))))))
+                        (org-mode-google-tasks-sync-org-task-status (nth 3 tasks))))
+            ;; Top-level tasks have nil parent-id.
+            (should (null (org-mode-google-tasks-sync-org-task-parent-id (nth 0 tasks))))
+            (should (null (org-mode-google-tasks-sync-org-task-parent-id (nth 1 tasks))))
+            ;; The nested child's parent-id is inferred from the org heading.
+            (should (equal "second-id"
+                           (org-mode-google-tasks-sync-org-task-parent-id (nth 2 tasks))))))
       (delete-file file))))
 
 (provide 'org-mode-google-tasks-sync-org-test)

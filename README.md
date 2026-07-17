@@ -28,7 +28,7 @@ This package syncs **Google Tasks only** — not Google Calendar events.
 | `TODO` / `DONE` keyword | ✅ ↔ `needsAction` / `completed` |
 | Body text (notes) | ✅ (verbatim — Google Tasks renders plain text, no Markdown / no org markup) |
 | `SCHEDULED:` date | ✅ ↔ Google `due` (date only — **time of day is dropped**) |
-| Subtask nesting (one level) | ✅ ↔ Google `parent` |
+| Subtask nesting (two levels) | ✅ ↔ Google `parent` — top-level tasks and one level of subtasks. Reparenting conflicts resolved remote-wins. |
 | `[#A]` / `[#B]` / `[#C]` priority cookies | ❌ Local-only — stripped from title on push, preserved on pull |
 | Tag ordering / `position` | ❌ Not synced in v1 |
 | Links / attachments (`links[]`, `webViewLink`) | 📖 Read-only display — populated by Gmail/Keep/Chat/Docs; stored as `:GTASK_LINKS:` / `:GTASK_WEB_LINK:` properties.  Not pushable via the API. |

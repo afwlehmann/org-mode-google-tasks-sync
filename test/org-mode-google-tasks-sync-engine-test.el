@@ -338,6 +338,8 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
   (let ((file (make-temp-file "gtasks-sweep-absent" nil ".org")))
     (unwind-protect
         (progn
+          (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+            (kill-buffer "*org-mode-google-tasks-sync-trash*"))
           (with-temp-file file
             (insert "* Tasks\n"
                     "** TODO Keep me\n"
@@ -358,7 +360,6 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
                            (title . "Keep me")
                            (status . "needsAction")
                            (updated . "2026-01-01T00:00:00.000Z"))))
-            ;; Stub out push helpers; they need a real token and network.
             (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
                        (lambda (&rest _) t))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
@@ -368,6 +369,7 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
                (list remote)
                #'ignore))))
       (with-current-buffer (find-file-noselect file)
+        (widen)
         (goto-char (point-min))
         (should (re-search-forward "Keep me" nil t))
         (should-not (re-search-forward "Delete me" nil t))
