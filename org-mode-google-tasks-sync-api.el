@@ -181,15 +181,20 @@ THEN is called with nil on success."
     :then then
     :else else))
 
-(defun org-mode-google-tasks-sync-api-move-task (token list-id task-id then else &optional new-parent-id)
+(defun org-mode-google-tasks-sync-api-move-task
+    (token list-id task-id then else &optional new-parent-id previous-id)
   "Move TASK-ID in LIST-ID using TOKEN to a new parent and/or position.
 NEW-PARENT-ID is the new parent task ID, or nil to move to top level.
+PREVIOUS-ID is the ID of the task to insert after, or nil to move
+to the first position within the new parent.  When both are nil the
+task stays in place parent-wise and moves to the first position.
 Calls THEN with the updated task; ELSE on error."
   (let* ((base-url (concat org-mode-google-tasks-sync-api--base-url
                            "/lists/" list-id "/tasks/" task-id "/move"))
-         (query-args (if new-parent-id
-                         `(("parent" . ,new-parent-id))
-                       nil))
+         (query-args
+          (delq nil
+                (list (when new-parent-id `("parent" . ,new-parent-id))
+                      (when previous-id `("previous" . ,previous-id)))))
          (url (if query-args
                   (concat base-url "?"
                           (org-mode-google-tasks-sync-api--query-string query-args))

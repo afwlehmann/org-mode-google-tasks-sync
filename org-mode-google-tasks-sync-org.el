@@ -302,6 +302,19 @@ heading (i.e. a top-level task) or when the parent heading has no
     (when (org-up-heading-safe)
       (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))))
 
+(defun org-mode-google-tasks-sync-org--prev-sibling-id-at-point ()
+  "Return :GTASK_ID: of the sibling immediately before the heading at point.
+Nil when the heading is the first sibling at its level.  Used by the
+trash snapshot so `restore-at-point' can call `tasks.move' with the
+correct `previous' query param."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((stars-regexp (format "^%s "
+                                (regexp-quote (make-string (org-current-level) ?*)))))
+      (if (re-search-backward stars-regexp nil t)
+          (org-entry-get nil org-mode-google-tasks-sync-org--prop-id)
+        nil))))
+
 (defun org-mode-google-tasks-sync-org-collect-tasks-under (file parent-heading list-id)
   "Return all task structs under PARENT-HEADING in FILE, up to 2 levels deep.
 LIST-ID is attached to each returned task.  Direct children

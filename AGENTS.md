@@ -4,7 +4,7 @@ This file gives an AI agent (or new human contributor) what they need to make sa
 
 ## At a glance
 
-Pure-Elisp two-way sync between org-mode and Google Tasks. Triggered by an Emacs timer + `after-save-hook`. Last-write-wins with conflict quarantine. Auto-delete in both directions. Single Google account, single subtree per list, no `position` sync in v1.
+Pure-Elisp two-way sync between org-mode and Google Tasks. Triggered by an Emacs timer + `after-save-hook`. Last-write-wins with conflict quarantine. Auto-delete in both directions. Single Google account, single subtree per list. `position` sync via `tasks.move` is driven by advice on org's own `M-↑`/`M-↓`/`M-←`/`M-→` keys (server-first, no race). DONE handling is configurable via `org-mode-google-tasks-sync-keep-done-items`.
 
 ## Use Nix when it's available
 
@@ -55,6 +55,8 @@ These hold throughout the codebase. Violating them produces silent data loss or 
 6. **Priority cookies (`[#A]`/`[#B]`/`[#C]`) are stripped from titles on push and preserved on pull.** `org-mode-google-tasks-sync-org--replace-title` rewrites only the title portion of a headline, keeping the TODO keyword and any priority prefix.
 7. **Direct children and one level of subtasks (2 levels max) are synced.** `collect-tasks-under` walks the subtree under the configured parent heading up to 2 levels deep. Headings at level 3+ are local-only. Each task's `parent-id` is inferred from the org heading hierarchy (not a separate property): `org-up-heading-safe` + `org-entry-get :GTASK_ID:`.
 8. **Secrets never get written directly to `~/.authinfo.gpg`.** Always go through `auth-source-search :create t` and call the returned `:save-function`. Bypassing this breaks the macOS Keychain / pass backends.
+9. **DONE handling is gated on `org-mode-google-tasks-sync-keep-done-items`.** When nil (default), completed tasks are removed from the local buffer (with trash snapshot and conflict quarantine) instead of kept as DONE headings. The decision fast-paths in `org-mode-google-tasks-sync-engine--decide` (`done-remove-local`, `done-push-then-remove`) must run *before* the 4-cell conflict matrix. Conflict resolution still favors the remote side.
+10. **Reorder/reparent advice is server-first.** `M-↑`/`M-↓`/`M-←`/`M-→` call `tasks.move` before moving the heading locally; the local move happens in the `:then` callback inside `inhibit-save-hooks`. This eliminates the race with `--sort-children` (which re-sorts by the stale `:GTASK_POSITION:` until the callback updates it). Subtree-variant keys (`M-S-←`/`M-S-→`) are refused on synced headings.
 
 ## The 4-cell conflict matrix (the heart of the engine)
 
@@ -190,6 +192,6 @@ Example: suppose Google adds a `priority` field to the Tasks API. To wire it in:
 - **Don't add a confirmation prompt for deletes.** The user explicitly chose auto-delete with logging.
 - **Don't introduce a new HTTP library.** `plz` is the choice.
 - **Don't sync more than 2 levels of subtask nesting.** Google Tasks supports arbitrary nesting in the API, but the web UI only shows 2 levels. Syncing deeper would create confusing org trees. The 2-level limit is enforced in `collect-tasks-under`.
-- **Don't try to sync `position`.** v2 work; needs `tasks.move` calls and a tiebreak rule for ordering conflicts. Not in v1 scope.
+- **Don't try to sync `position` via the tick path.** Position sync is driven exclusively by the advice on org's `M-↑`/`M-↓`/`M-←`/`M-→` keys (server-first via `tasks.move`). The tick path's `--sort-children` re-sorts by the stored `:GTASK_POSITION:` only; it never assigns new positions. Adding position writes to the tick would race with the advice callbacks.
 - **Don't add a verification flow for Google's "unverified app" warning.** Personal-use apps stay unverified by design.
 - **Don't read from `~/.authinfo.gpg` directly.** Always via `auth-source-search`.

@@ -14,30 +14,38 @@
 ;;; -- The 4-cell conflict matrix --------------------------------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/decide-skip ()
-  (should (eq 'skip
-              (org-mode-google-tasks-sync-engine--decide nil nil nil nil))))
+  (let ((org-mode-google-tasks-sync-keep-done-items t))
+    (should (eq 'skip
+                (org-mode-google-tasks-sync-engine--decide nil nil nil nil)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/decide-push ()
-  (should (eq 'push
-              (org-mode-google-tasks-sync-engine--decide t nil nil nil))))
+  (let ((org-mode-google-tasks-sync-keep-done-items t))
+    (should (eq 'push
+                (org-mode-google-tasks-sync-engine--decide t nil nil nil)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/decide-pull ()
-  (should (eq 'pull
-              (org-mode-google-tasks-sync-engine--decide nil t nil "2026-06-27T10:00:00Z"))))
+  (let ((org-mode-google-tasks-sync-keep-done-items t))
+    (should (eq 'pull
+                (org-mode-google-tasks-sync-engine--decide
+                 nil t nil "2026-06-27T10:00:00Z")))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/decide-conflict-remote-wins ()
   ;; remote.updated is after local-mtime → remote wins
-  (let ((local-mtime (float-time (parse-iso8601-time-string "2026-06-27T10:00:00Z")))
+  (let ((org-mode-google-tasks-sync-keep-done-items t)
+        (local-mtime (float-time (parse-iso8601-time-string "2026-06-27T10:00:00Z")))
         (remote-updated "2026-06-27T11:00:00Z"))
     (should (eq 'conflict-remote-wins
-                (org-mode-google-tasks-sync-engine--decide t t local-mtime remote-updated)))))
+                (org-mode-google-tasks-sync-engine--decide
+                 t t local-mtime remote-updated)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/decide-conflict-local-wins ()
   ;; local-mtime is after remote.updated → local wins
-  (let ((local-mtime (float-time (parse-iso8601-time-string "2026-06-27T12:00:00Z")))
+  (let ((org-mode-google-tasks-sync-keep-done-items t)
+        (local-mtime (float-time (parse-iso8601-time-string "2026-06-27T12:00:00Z")))
         (remote-updated "2026-06-27T11:00:00Z"))
     (should (eq 'conflict-local-wins
-                (org-mode-google-tasks-sync-engine--decide t t local-mtime remote-updated)))))
+                (org-mode-google-tasks-sync-engine--decide
+                 t t local-mtime remote-updated)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/decide-both-done-conflict ()
   "Both sides mark the task done, remote newer → conflict-remote-wins.
@@ -46,10 +54,58 @@ the canonical hash) differs from the stored hash on both sides, so both
 local-changed and remote-changed are true.  The newer remote timestamp
 wins rather than emitting a redundant push that would hit an already-done
 remote task."
-  (let ((local-mtime (float-time (parse-iso8601-time-string "2026-06-27T10:00:00Z")))
+  (let ((org-mode-google-tasks-sync-keep-done-items t)
+        (local-mtime (float-time (parse-iso8601-time-string "2026-06-27T10:00:00Z")))
         (remote-updated "2026-06-27T11:00:00Z"))
     (should (eq 'conflict-remote-wins
-                (org-mode-google-tasks-sync-engine--decide t t local-mtime remote-updated)))))
+                (org-mode-google-tasks-sync-engine--decide
+                 t t local-mtime remote-updated)))))
+
+;;; -- DONE-handling fast paths (keep-done-items = nil) -----------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/decide-done-remove-when-remote-completed ()
+  "When keep-done-items is nil and remote is completed, the decision is
+`done-remove-local' regardless of local-changed/remote-changed —
+remote always wins for DONE removal."
+  (let ((org-mode-google-tasks-sync-keep-done-items nil))
+    (should (eq 'done-remove-local
+                (org-mode-google-tasks-sync-engine--decide
+                 nil nil nil nil nil 'completed)))
+    ;; Even on a both-changed conflict.
+    (should (eq 'done-remove-local
+                (org-mode-google-tasks-sync-engine--decide
+                 t t 1700000000.0 "2026-06-27T11:00:00Z" nil 'completed)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/decide-done-push-when-local-completed ()
+  "When keep-done-items is nil and local is completed (but remote is not),
+the decision is `done-push-then-remove'."
+  (let ((org-mode-google-tasks-sync-keep-done-items nil))
+    (should (eq 'done-push-then-remove
+                (org-mode-google-tasks-sync-engine--decide
+                 nil nil nil nil 'completed nil)))
+    ;; Remote also changed (e.g. a content edit) — local-done still wins
+    ;; the fast path because remote-status is not 'completed.
+    (should (eq 'done-push-then-remove
+                (org-mode-google-tasks-sync-engine--decide
+                 t t 1700000000.0 "2026-06-27T11:00:00Z" 'completed nil)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/decide-done-remote-wins-over-local ()
+  "When both sides are completed and keep-done-items is nil, remote-done
+takes precedence (done-remove-local) — the task is removed locally
+without a redundant push."
+  (let ((org-mode-google-tasks-sync-keep-done-items nil))
+    (should (eq 'done-remove-local
+                (org-mode-google-tasks-sync-engine--decide
+                 t t 1700000000.0 "2026-06-27T11:00:00Z"
+                 'completed 'completed)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/decide-done-skip-when-keep-on ()
+  "When keep-done-items is t, the DONE fast paths don't fire and the
+normal 4-cell matrix applies."
+  (let ((org-mode-google-tasks-sync-keep-done-items t))
+    (should (eq 'skip
+                (org-mode-google-tasks-sync-engine--decide
+                 nil nil nil nil 'completed 'completed)))))
 
 ;;; -- RFC3339 parsing -------------------------------------------------------
 
@@ -431,6 +487,56 @@ heading — the 'items vanish on full sync' bug."
        "LIST-ID" nil #'ignore #'ignore))
     (should captured-url)
     (should (string-match-p "showCompleted=true" captured-url))))
+
+;;; -- move-task query string (previous param for sibling reordering) --------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/move-task-omits-previous-when-nil ()
+  "`api-move-task' omits the `previous' query param when nil.
+Backward compatibility for the reparenting call site which passes
+only `new-parent-id'."
+  (let (captured-url)
+    (cl-letf (((symbol-function 'plz)
+               (lambda (_method url &rest keys)
+                 (setq captured-url url)
+                 (funcall (plist-get keys :then) '((id . "t"))))))
+      (org-mode-google-tasks-sync-api-move-task
+       (make-org-mode-google-tasks-sync-api-token
+        :access-token "fake")
+       "LIST" "TASK" #'ignore #'ignore "PARENT" nil))
+    (should captured-url)
+    (should (string-match-p "parent=PARENT" captured-url))
+    (should-not (string-match-p "previous=" captured-url))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/move-task-includes-previous-when-given ()
+  "`api-move-task' includes `previous' in the query string when given.
+This is the sibling-reorder path: same parent (or nil), insert after
+PREVIOUS."
+  (let (captured-url)
+    (cl-letf (((symbol-function 'plz)
+               (lambda (_method url &rest keys)
+                 (setq captured-url url)
+                 (funcall (plist-get keys :then) '((id . "t"))))))
+      (org-mode-google-tasks-sync-api-move-task
+       (make-org-mode-google-tasks-sync-api-token
+        :access-token "fake")
+       "LIST" "TASK" #'ignore #'ignore "PARENT" "PREV"))
+    (should captured-url)
+    (should (string-match-p "parent=PARENT" captured-url))
+    (should (string-match-p "previous=PREV" captured-url))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/move-task-bare-url-when-no-params ()
+  "`api-move-task' produces a bare URL (no query) when both params are nil."
+  (let (captured-url)
+    (cl-letf (((symbol-function 'plz)
+               (lambda (_method url &rest keys)
+                 (setq captured-url url)
+                 (funcall (plist-get keys :then) '((id . "t"))))))
+      (org-mode-google-tasks-sync-api-move-task
+       (make-org-mode-google-tasks-sync-api-token
+        :access-token "fake")
+       "LIST" "TASK" #'ignore #'ignore nil nil))
+    (should captured-url)
+    (should-not (string-match-p "?" captured-url))))
 
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

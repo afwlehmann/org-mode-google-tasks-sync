@@ -25,12 +25,12 @@ This package syncs **Google Tasks only** — not Google Calendar events.
 | Field | Synced? |
 |---|---|
 | Heading title | ✅ |
-| `TODO` / `DONE` keyword | ✅ ↔ `needsAction` / `completed` |
+| `TODO` / `DONE` keyword | ✅ ↔ `needsAction` / `completed` — configurable via `org-mode-google-tasks-sync-keep-done-items` (see [DONE handling](#done-handling)) |
 | Body text (notes) | ✅ (verbatim — Google Tasks renders plain text, no Markdown / no org markup) |
 | `SCHEDULED:` date | ✅ ↔ Google `due` (date only — **time of day is dropped**) |
 | Subtask nesting (two levels) | ✅ ↔ Google `parent` — top-level tasks and one level of subtasks. Reparenting conflicts resolved remote-wins. |
 | `[#A]` / `[#B]` / `[#C]` priority cookies | ❌ Local-only — stripped from title on push, preserved on pull |
-| Tag ordering / `position` | ❌ Not synced in v1 |
+| Tag ordering / `position` | ✅ Via org's own `M-↑`/`M-↓`/`M-←`/`M-→` keys (server-first, no race) |
 | Links / attachments (`links[]`, `webViewLink`) | 📖 Read-only display — populated by Gmail/Keep/Chat/Docs; stored as `:GTASK_LINKS:` / `:GTASK_WEB_LINK:` properties.  Not pushable via the API. |
 | Starred | ❌ No `starred` field in the Tasks API v1 |
 | Recurring tasks | ❌ Google Tasks API is read-only for recurrence |
@@ -287,7 +287,24 @@ After each sync the children of the parent heading are sorted to match Google's 
 
 `:GTASK_POSITION:` and `:GTASK_COMPLETED:` are stored on each synced heading.  Headings you create manually under the parent (no position yet) sort to the top of the TODO section until the next sync POSTs them and Google assigns a position.
 
-Reordering inside the org file (`M-↑` / `M-↓`) is **not** pushed back to Google — the `tasks.move` integration is a v2 cut.  Any local reorder gets overwritten by the next sync.
+### Reorder and reparent with org's own keys
+
+When `org-mode-google-tasks-sync-mode` is enabled, org's built-in subtree-move and promote/demote keys are advised so they push to Google via `tasks.move`:
+
+| Key | Org command | Synced action |
+|---|---|---|
+| `M-↑` | `org-move-subtree-up` | Reorder among siblings (same parent) |
+| `M-↓` | `org-move-subtree-down` | Reorder among siblings (same parent) |
+| `M-←` | `org-do-promote` | Subtask → top-level (`parent=nil`) |
+| `M-→` | `org-do-demote` | Top-level → subtask (of preceding sibling) |
+| `M-S-←` | `org-promote-subtree` | **Refused** on synced headings |
+| `M-S-→` | `org-demote-subtree` | **Refused** on synced headings |
+
+All advised operations are **server-first**: the heading doesn't move locally until Google confirms the new position, which eliminates the race with the post-apply sort step.  You'll see a brief "Moving…" message while the API call is in flight.
+
+Non-synced headings pass through to org's original behavior with zero change.
+
+**Demote guard:** demoting a top-level task that itself has subtask headings is refused — the subtasks would fall to level N+3 (outside the 2-level sync window) and stop syncing.  Move or delete the subtasks first.
 
 ### Hide DONE tasks
 
@@ -316,7 +333,7 @@ Add a `* TODO` heading anywhere under the configured parent and save:
 
 After-save-hook schedules a sync ~1 s later.  The engine sees the heading has no `:GTASK_ID:`, POSTs it to Google, writes `:GTASK_ID:`, `:GTASK_UPDATED:`, `:GTASK_ETAG:`, and `:GTASK_POSITION:` back into the property drawer.
 
-For a guided prompt: `M-x org-mode-google-tasks-sync-new-task` — asks for a title (and optional due date), inserts the heading under the parent (or completing-read across multiple configured lists), and saves.
+For a guided prompt: `M-x org-mode-google-tasks-sync-new-task` — asks for a title, then uses org's calendar pop-up (`org-read-date`) to collect an optional scheduled date.  Press `C-g` at the date prompt for "no scheduled date".  Inserts the heading under the parent (or `completing-read` across multiple configured lists) and saves.
 
 ### Delete a task once and for all
 
@@ -332,9 +349,26 @@ For a guided prompt: `M-x org-mode-google-tasks-sync-new-task` — asks for a ti
 
 Caveats:
 
-- Google's API doesn't support "un-delete" — the original task is gone server-side once the DELETE succeeds.  Restoration creates a **fresh** task with the same title, notes, status, and due date.  A new `:GTASK_ID:` and position are assigned by Google; the original ID is preserved in the trash entry under `:GTASK_ID_ORIG:` for human reference only.
+- **Deleted tasks** (`:GTASK_REMOVAL_REASON: deleted`): the original task is gone server-side.  Restoration creates a **fresh** task with the same title, notes, status, and due date, then calls `tasks.move` to restore the original relative position (best-effort).  A new `:GTASK_ID:` is assigned by Google; the original ID is preserved in the trash entry under `:GTASK_ID_ORIG:` for human reference only.
+- **Done-removed tasks** (`:GTASK_REMOVAL_REASON: done-removed`): the task still exists on the server as completed.  Restoration **reopens** the original task (patches `status=needsAction`) and re-inserts the local heading with the original `:GTASK_ID:`, `:GTASK_UPDATED:`, `:GTASK_ETAG:`, and `:GTASK_POSITION:` — no duplicate is created, and the task appears at its original relative position.
 - The trash buffer is persisted to `$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org` by default; toggle via `org-mode-google-tasks-sync-persist-trash`.
 - The buffer never auto-purges.  Clean it yourself when you trust the deletions.
+
+### DONE handling
+
+By default (`org-mode-google-tasks-sync-keep-done-items` = nil), completed tasks are **removed from the local buffer** instead of kept as DONE headings:
+
+- **Server-side completion**: when Google marks a task DONE, the local heading is removed (snapshotted to trash as `done-removed`, restorable via `restore-at-point` which reopens the original task).
+- **Local completion**: when you mark a task DONE locally, the engine pushes `status=completed` to Google, then removes the local heading (also snapshotted as `done-removed`).
+- **Conflicts**: remote always wins — if both sides changed, the local version is quarantined to `*Google Tasks Conflicts*` before removal.
+
+To restore the historical two-way DONE sync behavior (completed tasks stay in the buffer as DONE headings):
+
+```elisp
+(setq org-mode-google-tasks-sync-keep-done-items t)
+```
+
+This is a **breaking change**: users upgrading from a version that always kept DONE headings will, after upgrading, see completed tasks start disappearing from the org buffer.  Set the defcustom to `t` to restore the prior behavior.
 
 ---
 
@@ -507,7 +541,7 @@ See `AGENTS.md` for module layout, internal invariants, and conventions.
 - Google Tasks only (no Calendar events).
 - Single top-level subtree per list — synced headings must be direct children of the configured `PARENT-HEADING`.
 - Subtask nesting limited to one level (Google's data model only supports one).
-- Tasks reordered in one side don't reorder the other (no `position` sync in v1).
+- Tasks reordered in one side don't reorder the other automatically — use org's `M-↑`/`M-↓`/`M-←`/`M-→` keys to push reorders to Google (see [Reorder and reparent](#reorder-and-reparent-with-orgs-own-keys)).
 - `due` is date-only; times of day are dropped on round-trip.
 - Recurring tasks: Google Tasks API is read-only for recurrence; not supported here.
 - Sync only runs while Emacs is open.

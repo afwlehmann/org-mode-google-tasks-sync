@@ -28,6 +28,11 @@ engine can reference it without a circular require.")
 Defined in `org-mode-google-tasks-sync.el'; declared here so the
 engine can reference it without a circular require.")
 
+(defvar org-mode-google-tasks-sync-keep-done-items nil
+  "Whether to keep DONE tasks in the local buffer.
+Defined in `org-mode-google-tasks-sync.el'; declared here so the
+engine can reference it without a circular require.")
+
 (defconst org-mode-google-tasks-sync-engine--log-buffer-name
   "*org-mode-google-tasks-sync-log*")
 
@@ -139,11 +144,42 @@ Carries EXISTING-MARKER if known."
             data))
     data))
 
-(defun org-mode-google-tasks-sync-engine--decide (local-changed remote-changed local-mtime remote-updated)
-  "Return one of: skip, push, pull, conflict-local-wins, conflict-remote-wins.
-LOCAL-CHANGED and REMOTE-CHANGED are booleans.
-LOCAL-MTIME is `float-time'; REMOTE-UPDATED is an RFC3339 string."
+(defun org-mode-google-tasks-sync-engine--keep-done-p ()
+  "Return non-nil when DONE tasks should be kept in both buffers.
+Reads `org-mode-google-tasks-sync-keep-done-items' (defined in the
+entry-point file).  Returns nil when the variable is unbound so
+`--decide' stays pure and testable in isolation."
+  (and (boundp 'org-mode-google-tasks-sync-keep-done-items)
+       org-mode-google-tasks-sync-keep-done-items))
+
+(defun org-mode-google-tasks-sync-engine--remote-completed-p (remote)
+  "Return non-nil if REMOTE alist indicates the task is completed."
+  (equal (alist-get 'status remote) "completed"))
+
+(defun org-mode-google-tasks-sync-engine--local-completed-p (local)
+  "Return non-nil if LOCAL struct indicates the task is completed."
+  (eq (org-mode-google-tasks-sync-org-task-status local) 'completed))
+
+(defun org-mode-google-tasks-sync-engine--decide
+    (local-changed remote-changed local-mtime remote-updated
+     &optional local-status remote-status)
+  "Return the sync decision for one task.
+One of: skip, push, pull, conflict-local-wins,
+conflict-remote-wins, done-remove-local, done-push-then-remove.
+LOCAL-CHANGED and REMOTE-CHANGED are booleans.  LOCAL-MTIME is
+`float-time'; REMOTE-UPDATED is an RFC3339 string.  Optional
+LOCAL-STATUS and REMOTE-STATUS are the task status symbols and
+are only consulted when `org-mode-google-tasks-sync-keep-done-items'
+is nil — the DONE fast paths run before the 4-cell conflict matrix
+so remote-completed always wins (with local quarantine if the
+local side had pending edits)."
   (cond
+   ((and (not (org-mode-google-tasks-sync-engine--keep-done-p))
+         (eq remote-status 'completed))
+    'done-remove-local)
+   ((and (not (org-mode-google-tasks-sync-engine--keep-done-p))
+         (eq local-status 'completed))
+    'done-push-then-remove)
    ((and (not local-changed) (not remote-changed)) 'skip)
    ((and local-changed (not remote-changed)) 'push)
    ((and (not local-changed) remote-changed) 'pull)
@@ -449,23 +485,25 @@ remote `parent', not under PARENT-MARKER."
     (cond
      ((eq deleted t)
       (when local (org-mode-google-tasks-sync-engine--delete-local local file)))
-     ((null local)
-      (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
-                    remote list-id nil)))
-        ;; For subtasks, insert under the parent task's heading, not
-        ;; the configured parent heading.  Look up by :GTASK_ID:.
-        (let ((insert-marker
-               (if remote-parent
-                   (or (when (gethash remote-parent local-by-id)
-                         (org-mode-google-tasks-sync-org-task-marker
-                          (gethash remote-parent local-by-id)))
-                       (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
-                        file remote-parent))
-                 parent-marker)))
-          (when insert-marker
-            (org-mode-google-tasks-sync-org-insert-task-under insert-marker task)
-            (org-mode-google-tasks-sync-engine--log "Pulled new: %s"
-                                               (org-mode-google-tasks-sync-org-task-title task))))))
+      ((null local)
+       (unless (and (not (org-mode-google-tasks-sync-engine--keep-done-p))
+                    (org-mode-google-tasks-sync-engine--remote-completed-p remote))
+         (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
+                       remote list-id nil)))
+           ;; For subtasks, insert under the parent task's heading, not
+           ;; the configured parent heading.  Look up by :GTASK_ID:.
+           (let ((insert-marker
+                  (if remote-parent
+                      (or (when (gethash remote-parent local-by-id)
+                            (org-mode-google-tasks-sync-org-task-marker
+                             (gethash remote-parent local-by-id)))
+                          (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
+                           file remote-parent))
+                    parent-marker)))
+             (when insert-marker
+               (org-mode-google-tasks-sync-org-insert-task-under insert-marker task)
+               (org-mode-google-tasks-sync-engine--log "Pulled new: %s"
+                                                  (org-mode-google-tasks-sync-org-task-title task)))))))
      (t
       (progn
        (let* ((local-parent (org-mode-google-tasks-sync-org-task-parent-id local))
@@ -492,22 +530,24 @@ remote `parent', not under PARENT-MARKER."
                "Reparented (remote): %s -> parent=%s"
                (org-mode-google-tasks-sync-org-task-title local)
                (or remote-parent "<top-level>")))
-             (t
-              ;; Local reparented; push to Google via tasks.move.
-              (org-mode-google-tasks-sync-api-move-task
-               token list-id id
-               (lambda (resp)
-                 (setf (org-mode-google-tasks-sync-org-task-updated local)
-                       (alist-get 'updated resp))
-                 (org-mode-google-tasks-sync-engine--log
-                  "Reparented (local push): %s -> parent=%s"
-                  (org-mode-google-tasks-sync-org-task-title local)
-                  (or local-parent "<top-level>")))
-               (lambda (err)
-                 (org-mode-google-tasks-sync-engine--log
-                  "Reparent push error: %S (task=%s)"
-                  err (org-mode-google-tasks-sync-org-task-title local)))
-               local-parent))))))
+              (t
+               ;; Local reparented; push to Google via tasks.move.
+               ;; Pass local-parent as :new-parent-id (not :previous-id,
+               ;; which is for sibling reordering, not reparenting).
+               (org-mode-google-tasks-sync-api-move-task
+                token list-id id
+                (lambda (resp)
+                  (setf (org-mode-google-tasks-sync-org-task-updated local)
+                        (alist-get 'updated resp))
+                  (org-mode-google-tasks-sync-engine--log
+                   "Reparented (local push): %s -> parent=%s"
+                   (org-mode-google-tasks-sync-org-task-title local)
+                   (or local-parent "<top-level>")))
+                (lambda (err)
+                  (org-mode-google-tasks-sync-engine--log
+                   "Reparent push error: %S (task=%s)"
+                   err (org-mode-google-tasks-sync-org-task-title local)))
+                local-parent nil))))))
       (let* ((local-changed (not (equal
                                   (org-mode-google-tasks-sync-org-canonical-hash local)
                                   (org-mode-google-tasks-sync-org-task-hash local))))
@@ -519,19 +559,29 @@ remote `parent', not under PARENT-MARKER."
                         (and (org-mode-google-tasks-sync-org-task-marker local)
                              (org-mode-google-tasks-sync-engine--marker-mtime
                               (org-mode-google-tasks-sync-org-task-marker local)))
-                        (alist-get 'updated remote))))
+                        (alist-get 'updated remote)
+                        (org-mode-google-tasks-sync-org-task-status local)
+                        (if (equal (alist-get 'status remote) "completed")
+                            'completed 'needsAction))))
         (pcase decision
+          ('done-remove-local
+           (when local-changed
+             (org-mode-google-tasks-sync-engine--quarantine "local-overwritten-done" local))
+           (org-mode-google-tasks-sync-engine--remove-done-local local file))
+          ('done-push-then-remove
+           (org-mode-google-tasks-sync-engine--push-and-remove-on-done
+            token list-id local file))
           ('skip nil)
           ('push (org-mode-google-tasks-sync-engine--push-update token list-id local))
           ('pull (org-mode-google-tasks-sync-engine--apply-pull list-id local remote))
           ('conflict-remote-wins
            (org-mode-google-tasks-sync-engine--quarantine "local-overwritten" local)
            (org-mode-google-tasks-sync-engine--apply-pull list-id local remote))
-           ('conflict-local-wins
-            (org-mode-google-tasks-sync-engine--quarantine
-             "remote-overwritten"
-             (org-mode-google-tasks-sync-engine--remote-task->struct remote list-id nil))
-            (org-mode-google-tasks-sync-engine--push-update token list-id local)))))))))
+          ('conflict-local-wins
+           (org-mode-google-tasks-sync-engine--quarantine
+            "remote-overwritten"
+            (org-mode-google-tasks-sync-engine--remote-task->struct remote list-id nil))
+           (org-mode-google-tasks-sync-engine--push-update token list-id local)))))))))
 
 (defun org-mode-google-tasks-sync-engine--marker-mtime (marker)
   "Return `float-time' of the file backing MARKER, or nil."
@@ -600,8 +650,12 @@ parent's heading marker."
     (org-mode-google-tasks-sync-engine--log "Pulled: %s"
                                        (org-mode-google-tasks-sync-org-task-title task))))
 
-(defun org-mode-google-tasks-sync-engine--push-update (token list-id task)
-  "Push TASK to Google in LIST-ID using TOKEN.  Fire-and-forget with logging."
+(defun org-mode-google-tasks-sync-engine--push-update (token list-id task &optional on-success)
+  "Push TASK to Google in LIST-ID using TOKEN.  Fire-and-forget with logging.
+When ON-SUCCESS is non-nil it is called with the response alist after
+the push succeeds and the local heading has been updated — used by
+the DONE-push-then-remove path to remove the heading once the server
+confirms the completion."
   (org-mode-google-tasks-sync-api-patch-task
    token list-id
    (org-mode-google-tasks-sync-org-task-id task)
@@ -619,7 +673,8 @@ parent's heading marker."
               (goto-char (org-mode-google-tasks-sync-org-task-marker task))
               (org-mode-google-tasks-sync-org-write-task task)))))
       (org-mode-google-tasks-sync-engine--log "Pushed: %s"
-                                         (org-mode-google-tasks-sync-org-task-title task)))
+                                         (org-mode-google-tasks-sync-org-task-title task))
+      (when on-success (funcall on-success resp)))
    (lambda (err)
      (org-mode-google-tasks-sync-engine--log "Push error: %S (task=%s)"
                                         err
@@ -652,17 +707,21 @@ query param to `tasks.insert' so Google knows the nesting."
                                          (org-mode-google-tasks-sync-org-task-title task)))
      insert-args)))
 
-(defun org-mode-google-tasks-sync-engine--delete-local (task &optional source-file)
+(defun org-mode-google-tasks-sync-engine--delete-local (task &optional source-file reason)
   "Remove TASK's heading from the buffer.
 Snapshots TASK to the trash buffer when SOURCE-FILE is given, so
 engine-side deletions (tombstones and the full-sync sweep) are
 recoverable via `org-mode-google-tasks-sync-restore-at-point' —
 matching what the README documents.  Interactive deletions go
 through `org-mode-google-tasks-sync-delete-at-point', which
-snapshots separately and leaves SOURCE-FILE nil here."
+snapshots separately and leaves SOURCE-FILE nil here.
+Optional REASON is `deleted' or `done-removed' (default `deleted');
+it threads through to `--snapshot-to-trash' so `restore-at-point'
+knows whether to reopen the original task (done-removed) or
+create a fresh one (deleted)."
   (when (and source-file (fboundp 'org-mode-google-tasks-sync--snapshot-to-trash))
     (condition-case err
-        (org-mode-google-tasks-sync--snapshot-to-trash task source-file)
+        (org-mode-google-tasks-sync--snapshot-to-trash task source-file reason)
       (error
        (org-mode-google-tasks-sync-engine--log
         "Trash snapshot failed (task=%s): %S"
@@ -676,6 +735,26 @@ snapshots separately and leaves SOURCE-FILE nil here."
         (delete-region begin end))))
   (org-mode-google-tasks-sync-engine--log "Deleted local: %s"
                                      (org-mode-google-tasks-sync-org-task-title task)))
+
+(defun org-mode-google-tasks-sync-engine--remove-done-local (task file)
+  "Remove the DONE TASK from the buffer and snapshot to trash as done-removed.
+FILE is the source org file (used for the trash :SOURCE_FILE:).
+Delegates to `--delete-local' with REASON `done-removed' so
+`restore-at-point' knows the task still exists server-side and can
+reopen it rather than creating a duplicate."
+  (org-mode-google-tasks-sync-engine--delete-local task file 'done-removed))
+
+(defun org-mode-google-tasks-sync-engine--push-and-remove-on-done
+    (token list-id local file)
+  "Push LOCAL (completed) to Google via TOKEN, then remove from the buffer.
+LIST-ID is the Google Tasks list.  The removal happens in the
+success callback, only after the server returns the completed task.
+On error the local heading is left in place and logged.  Uses FILE
+for the trash snapshot."
+  (org-mode-google-tasks-sync-engine--push-update
+   token list-id local
+   (lambda (_resp)
+     (org-mode-google-tasks-sync-engine--remove-done-local local file))))
 
 (defun org-mode-google-tasks-sync-engine-discover-lists ()
   "Fetch and print available task lists."
