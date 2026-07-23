@@ -267,6 +267,51 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
       (should-error (org-mode-google-tasks-sync-engine-run 'incremental))
       (should (eq org-mode-google-tasks-sync-engine--state 'idle)))))
 
+(ert-deftest org-mode-google-tasks-sync-engine-test/token-returns-cached-when-not-expired ()
+  "A cached token whose `expires-at' is in the future is returned as-is.
+`oauth-make-token' must not be called."
+  (let ((org-mode-google-tasks-sync-engine--token
+         (make-org-mode-google-tasks-sync-api-token
+          :access-token "cached"
+          :expires-at (+ (float-time) 3600))))
+    (cl-letf (((symbol-function 'org-mode-google-tasks-sync-oauth-make-token)
+               (lambda () (error "oauth-make-token should not be called"))))
+      (let ((tok (org-mode-google-tasks-sync-engine--token)))
+        (should (equal "cached"
+                       (org-mode-google-tasks-sync-api-token-access-token tok)))
+        (should (eq tok org-mode-google-tasks-sync-engine--token))))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/token-refreshes-when-expired ()
+  "A cached token past its `expires-at' is replaced by a fresh one."
+  (let ((org-mode-google-tasks-sync-engine--token
+         (make-org-mode-google-tasks-sync-api-token
+          :access-token "stale"
+          :expires-at (1- (float-time)))))
+    (cl-letf (((symbol-function 'org-mode-google-tasks-sync-oauth-make-token)
+               (lambda ()
+                 (make-org-mode-google-tasks-sync-api-token
+                  :access-token "fresh"
+                  :expires-at (+ (float-time) 3600)))))
+      (let ((tok (org-mode-google-tasks-sync-engine--token)))
+        (should (equal "fresh"
+                       (org-mode-google-tasks-sync-api-token-access-token tok)))
+        (should (eq tok org-mode-google-tasks-sync-engine--token))))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/token-refreshes-when-expires-at-nil ()
+  "A cached token with nil `expires-at' is treated as expired and refreshed."
+  (let ((org-mode-google-tasks-sync-engine--token
+         (make-org-mode-google-tasks-sync-api-token
+          :access-token "unknown-expiry")))
+    (cl-letf (((symbol-function 'org-mode-google-tasks-sync-oauth-make-token)
+               (lambda ()
+                 (make-org-mode-google-tasks-sync-api-token
+                  :access-token "fresh"
+                  :expires-at (+ (float-time) 3600)))))
+      (let ((tok (org-mode-google-tasks-sync-engine--token)))
+        (should (equal "fresh"
+                       (org-mode-google-tasks-sync-api-token-access-token tok)))
+        (should (eq tok org-mode-google-tasks-sync-engine--token))))))
+
 (ert-deftest org-mode-google-tasks-sync-engine-test/timeout-resets-stuck-state ()
   "When the timeout timer fires while state is not idle, it resets to idle."
   (let ((org-mode-google-tasks-sync-engine--state 'fetching))

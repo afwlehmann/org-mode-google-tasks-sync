@@ -215,10 +215,19 @@ LOCAL-MTIME is `float-time'; REMOTE-UPDATED is an RFC3339 string."
   "Cached API token for the current Emacs session.")
 
 (defun org-mode-google-tasks-sync-engine--token ()
-  "Return a token, refreshing from auth-source as needed."
-  (or org-mode-google-tasks-sync-engine--token
-      (setq org-mode-google-tasks-sync-engine--token
-            (org-mode-google-tasks-sync-oauth-make-token))))
+  "Return a non-expired API token, refreshing when necessary.
+The cached token's `expires-at' (set 60s before the real expiry by
+`oauth--refresh-access-token') is checked on every call; a token
+past its expiry is replaced by a fresh one from auth-source."
+  (let ((cached org-mode-google-tasks-sync-engine--token))
+    (when (and cached
+               (let ((exp (org-mode-google-tasks-sync-api-token-expires-at cached)))
+                 (or (null exp) (<= exp (float-time)))))
+      (setq org-mode-google-tasks-sync-engine--token nil)
+      (setq cached nil))
+    (or cached
+        (setq org-mode-google-tasks-sync-engine--token
+              (org-mode-google-tasks-sync-oauth-make-token)))))
 
 (defun org-mode-google-tasks-sync-engine-run (mode)
   "Run a sync pass.  MODE is `incremental' or `full'."
