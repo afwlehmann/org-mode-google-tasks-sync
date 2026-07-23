@@ -121,6 +121,25 @@ Test files:
 
 There are intentionally no tests that hit the real Google API — those would be flaky and require credentials. Integration testing is manual; see the README troubleshooting section and the verification plan in the original design doc at `~/.claude/plans/i-need-tooling-to-dapper-moonbeam.md`.
 
+## Releasing (version bump + tag)
+
+Version lives in two places and must be kept in sync:
+
+- `org-mode-google-tasks-sync.el` — `;; Version:` header line
+- `nix/package.nix` — `version = "X.Y.Z";`
+
+To cut a release (bugfix → patch bump, e.g. `0.3.0` → `0.3.1`):
+
+1. Edit both files with the new version.
+2. `git tag vX.Y.Z` (annotated tag on the bump commit).
+3. Commit and push both `main` and the tag:
+   ```sh
+   git push origin main
+   git push origin refs/tags/vX.Y.Z
+   ```
+
+Tags follow `vMAJOR.MINOR.PATCH` (e.g. `v0.3.1`). Force-moving a published tag requires `--force` on the refspec (`refs/tags/vX.Y.Z`); only do this for a rewritten commit that hasn't been consumed downstream.
+
 ## Linting and formatting
 
 All Emacs Lisp source files must pass **byte-compile** (zero warnings) and **checkdoc** (zero warnings) checks. A combined lint script is at `hooks/lint.el`:
