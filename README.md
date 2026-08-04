@@ -259,20 +259,6 @@ The `with-eval-after-load` guard matters: without it, the keymap is still `nil` 
 
 Use a different prefix if `C-c g` clashes with something in your own config — the keymap is independent of the prefix you choose.
 
-### Home Manager users
-
-The Home Manager module auto-binds the keymap for you via the `keyPrefix` option (default: `"C-c g"`).  The binding is emitted into `programs.emacs.extraConfig` with a `with-eval-after-load` guard, so it works regardless of your Emacs package or load order.  To change the prefix:
-
-```nix
-programs.org-mode-google-tasks-sync.keyPrefix = "C-c t";
-```
-
-To disable auto-binding entirely (e.g. if you wire keys yourself):
-
-```nix
-programs.org-mode-google-tasks-sync.keyPrefix = null;
-```
-
 ---
 
 ## Display, ordering, and editing
@@ -373,155 +359,6 @@ This is a **breaking change**: users upgrading from a version that always kept D
 
 ---
 
-## Nix integration
-
-The repo ships a flake with three outputs:
-
-- `overlays.default` — adds `org-mode-google-tasks-sync` to `pkgs.emacsPackages`.
-- `homeManagerModules.default` — Home Manager module that installs the package and writes the Emacs config.
-- `packages.<system>.default` — the byte-compiled package, if you'd rather wire it up manually.
-
-### Minimal Home Manager setup
-
-```nix
-# your flake.nix
-inputs.org-mode-google-tasks-sync = {
-  url = "github:afwlehmann/org-mode-google-tasks-sync";
-  inputs.nixpkgs.follows = "nixpkgs";
-};
-
-# your home.nix
-{ config, inputs, ... }: {
-  nixpkgs.overlays = [ inputs.org-mode-google-tasks-sync.overlays.default ];
-  imports = [ inputs.org-mode-google-tasks-sync.homeManagerModules.default ];
-
-  programs.org-mode-google-tasks-sync = {
-    enable = true;
-    map = {
-      "MTYxOTU..." = {
-        file = "${config.home.homeDirectory}/org/personal.org";
-        parentHeading = "Inbox";
-      };
-    };
-  };
-}
-```
-
-After `home-manager switch`, run `M-x org-mode-google-tasks-sync-setup` once (same as the non-Nix flow) — all three secrets end up in `~/.authinfo.gpg` via auth-source.
-
-#### One-rebuild bootstrap from the shell
-
-To go from zero to a single `home-manager switch`, do the OAuth dance **before** any HM rebuild, then drop everything into your declarative config. The repo ships a self-contained bootstrap that fetches the code via Nix — no clone required:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/afwlehmann/org-mode-google-tasks-sync/main/bootstrap.sh | sh
-```
-
-Or, equivalently:
-
-```sh
-nix run github:afwlehmann/org-mode-google-tasks-sync#bootstrap
-```
-
-The helper prompts for `client_id` and `client_secret` (paste them from the Cloud Console), opens your browser to the consent screen, and after you click **Allow**, prints to stdout:
-
-```
---- Bootstrap complete ---
-client_id=1234567890-abcdef.apps.googleusercontent.com
-client_secret=<the value you just entered>
-refresh_token=1//0gAbcDef...
-
---- Google Tasks lists (use these IDs in `map') ---
-MTYxOTU...   Personal
-MTk0NDg...   Work
-```
-
-The bootstrap writes `client_id`, `client_secret`, and `refresh_token` to `~/.authinfo.gpg` along the way (the standard Emacs auth-source location).  You can stop here: copy the list IDs into your HM `map`, set `clientId`/`clientSecretFile`/`gpgRecipient`, and `home-manager switch` once.  Emacs's `auth-sources` walks both the HM-managed XDG file (for client_id/client_secret) and `~/.authinfo.gpg` (for the refresh_token), so everything resolves on the first rebuild.
-
-```nix
-sops.secrets.org-mode-google-tasks-sync-client-secret.sopsFile = ./secrets.yaml;
-
-programs.org-mode-google-tasks-sync = {
-  enable = true;
-  clientId         = "1234567890-abcdef.apps.googleusercontent.com";
-  clientSecretFile = config.sops.secrets.org-mode-google-tasks-sync-client-secret.path;
-  gpgRecipient     = "alex@example.com";
-  map = {
-    "MTYxOTU..." = { file = "${config.home.homeDirectory}/org/personal.org"; parentHeading = "Inbox"; };
-    "MTk0NDg..." = { file = "${config.home.homeDirectory}/org/work.org";     parentHeading = "Tasks"; };
-  };
-};
-```
-
-Single `home-manager switch`.  Subsequent `M-x org-mode-google-tasks-sync-authorize` (after a future revocation) writes the new refresh token to the HM-managed `dynamic-creds.authinfo.gpg`; the bootstrap-time copy in `~/.authinfo.gpg` becomes a fallback but doesn't interfere because `auth-sources` walks in order and the dynamic file is first.
-
-#### Fetching list IDs only
-
-If you already have a refresh token stored, you can re-fetch list IDs at any time:
-
-```sh
-nix develop --command emacs --batch \
-  -l org-mode-google-tasks-sync.el \
-  -f org-mode-google-tasks-sync-engine-discover-lists-batch
-```
-
-Useful when you create new Google Tasks lists and want to extend your `map` without re-running the full bootstrap.
-
-### Declarative credentials (sops-nix, agenix, …)
-
-Set `clientId`, `clientSecretFile`, and `gpgRecipient` to materialize a pair of GPG-encrypted auth-source files under `$XDG_DATA_HOME/org-mode-google-tasks-sync/` at activation time. HM writes `static-creds.authinfo.gpg` from scratch on every rebuild (encrypt-only, no gpg-agent dependency at activation), and Emacs writes the refresh token to `dynamic-creds.authinfo.gpg`. A pinned `.dir-locals.el` keeps EasyPG from prompting for the recipient. `~/.authinfo.gpg` is never touched.
-
-SOPS example:
-
-```nix
-sops.secrets.org-mode-google-tasks-sync-client-secret.sopsFile = ./secrets.yaml;
-
-programs.org-mode-google-tasks-sync = {
-  enable = true;
-  clientId         = "1234567890-abcdef.apps.googleusercontent.com";
-  clientSecretFile = config.sops.secrets.org-mode-google-tasks-sync-client-secret.path;
-  gpgRecipient     = "alex@example.com";
-  map = { /* ... */ };
-};
-```
-
-`secrets.yaml` (SOPS-encrypted) holds just the secret value:
-
-```yaml
-org-mode-google-tasks-sync-client-secret: GOCSPX-xxxxxxxxxxxxxxxxxxxx
-```
-
-Then `M-x org-mode-google-tasks-sync-authorize` once (no `-configure` needed). For agenix or NixOS keys, point `clientSecretFile` at their runtime path the same way.
-
-### All module options
-
-| Option | Type | Default | Purpose |
-|---|---|---|---|
-| `enable` | bool | `false` | Master switch. |
-| `package` | package | `pkgs.emacsPackages.org-mode-google-tasks-sync` | Override to pin or fork. |
-| `clientId` | nullable string | `null` | OAuth client ID (set together with the next two for the declarative bridge). |
-| `clientSecretFile` | nullable path | `null` | Runtime path to a file containing the client secret. |
-| `gpgRecipient` | nullable string | `null` | GPG key id/email used to encrypt the XDG credentials files. |
-| `map` | attrset of `{ file, parentHeading }` | `{}` | List ID → org file + parent heading. |
-| `tickInterval` | positive int | `60` | Seconds between cheap wake-up checks.  Each tick checks file mtimes and only syncs when something changed.  Determines how quickly external edits show up in Google. |
-| `pollInterval` | positive int | `300` | Maximum seconds between syncs — safety net so Google-side changes get pulled even when nothing local has changed. |
-| `fullSyncInterval` | positive int | `86400` | Seconds between full reconciliations. |
-| `autoEnableMode` | bool | `true` | Auto-start `org-mode-google-tasks-sync-mode`. |
-| `extraConfig` | lines | `""` | Extra Elisp appended to the generated config. |
-
-### Without Home Manager
-
-If you assemble your Emacs differently, apply the overlay and pull the package out yourself:
-
-```nix
-nixpkgs.overlays = [ inputs.org-mode-google-tasks-sync.overlays.default ];
-programs.emacs.extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
-```
-
-Or try it directly: `nix run github:afwlehmann/org-mode-google-tasks-sync#emacs`.
-
----
-
 ## Troubleshooting
 
 ### Transient HTTP errors and rate limits
@@ -530,7 +367,8 @@ Every request (list, insert, patch, delete, move) is retried automatically
 on transient failures: HTTP **429 / 500 / 502 / 503 / 504**, and curl-level
 transport errors (DNS / connection / timeout / SSL handshake / empty reply /
 recv failure). Retry uses exponential backoff with full jitter (uniform in
-[0.5 s, 2 s · 2⁻ⁿ]) and honors `Retry-After` up to a 60-second cap. Worst
+[0.5 s, 2 s] after the first failure, [0.5 s, 4 s] after the second) and
+honors `Retry-After` up to a 60-second cap. Worst
 case, three attempts are made before the request surfaces to `*org-mode-google-tasks-sync-log*` as an error — so a single busy Google's rate-limit response doesn't kill a tick.
 
 Non-transient errors (400/404/412 handled differently, auth failures) are
