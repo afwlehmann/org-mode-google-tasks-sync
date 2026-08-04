@@ -754,15 +754,6 @@ engine's own write would re-trigger the sync chain on every save."
 ;; race with the post-apply `--sort-children' step (it re-sorts by the
 ;; stale :GTASK_POSITION: until the callback updates it).
 
-(declare-function org-mode-google-tasks-sync--last-child-id "org-mode-google-tasks-sync.el" (parent-marker))
-(declare-function org-mode-google-tasks-sync--compute-demote-params "org-mode-google-tasks-sync.el" ())
-(declare-function org-mode-google-tasks-sync--update-heading-server-state "org-mode-google-tasks-sync.el" (updated etag position))
-(declare-function org-mode-google-tasks-sync--apply-server-move "org-mode-google-tasks-sync.el" (token list-id task-id new-parent-id previous-id title &optional post-move-fn))
-(declare-function org-mode-google-tasks-sync--advised-move "org-mode-google-tasks-sync.el" (orig-fn direction))
-(declare-function org-mode-google-tasks-sync--advised-promote "org-mode-google-tasks-sync.el" (orig-fn))
-(declare-function org-mode-google-tasks-sync--advised-demote "org-mode-google-tasks-sync.el" (orig-fn))
-(declare-function org-mode-google-tasks-sync--refuse-subtree-op "org-mode-google-tasks-sync.el" (orig-fn))
-
 (defun org-mode-google-tasks-sync--synced-task-at-point-p ()
   "Return non-nil if the heading at point is a synced Google Task."
   (and (derived-mode-p 'org-mode)
@@ -773,31 +764,33 @@ engine's own write would re-trigger the sync chain on every save."
 (defun org-mode-google-tasks-sync--sibling-ids ()
   "Return a list of (MARKER . GTASK_ID) for direct siblings of heading at point.
 Includes the heading at point itself, in buffer order.  Siblings
-without :GTASK_ID: are skipped (they're local-only)."
+without :GTASK_ID: are skipped (they're local-only).  Uses
+`org-get-previous-sibling' / `org-get-next-sibling' so a sibling's
+child subtree is never mistaken for a sibling, and so the walk
+terminates cleanly (the `same-level' variants can loop forever when
+a heading has no siblings at its own level but shares the parent
+with a deeper subtree)."
   (save-excursion
     (org-back-to-heading t)
-    (let* ((level (org-current-level))
-           (siblings '()))
-      ;; Walk backward to collect siblings before point.
+    (let* ((here-marker (point-marker))
+           (here-id (org-entry-get nil "GTASK_ID"))
+           (before '())
+           (after '()))
       (save-excursion
-        (while (and (not (bobp))
-                    (re-search-backward "^\\*+ " nil t))
-          (when (= (org-current-level) level)
-            (push (cons (point-marker)
-                        (org-entry-get nil "GTASK_ID"))
-                  siblings))))
-      ;; Walk forward from point to collect siblings after point.
+        (while (org-get-previous-sibling)
+          (push (cons (point-marker)
+                      (org-entry-get nil "GTASK_ID"))
+                before)))
       (save-excursion
-        (forward-line 1)
-        (while (and (not (eobp))
-                    (looking-at "^\\*+ ")
-                    (<= (org-current-level) level))
-          (when (= (org-current-level) level)
-            (push (cons (point-marker)
-                        (org-entry-get nil "GTASK_ID"))
-                  siblings))
-          (forward-line 1)))
-      (nreverse siblings))))
+        (goto-char here-marker)
+        (while (org-get-next-sibling)
+          (push (cons (point-marker)
+                      (org-entry-get nil "GTASK_ID"))
+                after)))
+      (cl-remove-if (lambda (cell) (null (cdr cell)))
+                    (nconc before
+                           (cons (cons here-marker here-id)
+                                 (nreverse after)))))))
 
 (defun org-mode-google-tasks-sync--prev-sibling-id (sibs current-marker)
   "Return the :GTASK_ID: of the sibling immediately before CURRENT-MARKER.
@@ -836,34 +829,31 @@ possible (heading is already at the edge)."
          ;; previous-id = the sibling that will precede us after the move.
          (let* ((target-idx (max 0 (1- idx)))
                 (prev-sib (and (> target-idx 0)
-                               (with-no-warnings
-                                 (nth (1- target-idx) sibs)))))
+                               (nth (1- target-idx) sibs))))
            (cons parent-id (cdr-safe prev-sib))))
         (t ;; direction 'down
          ;; After moving down, the sibling that was immediately after us
          ;; becomes our predecessor.
-         (let ((after-sib (with-no-warnings (nth (1+ idx) sibs))))
-           (cons parent-id (cdr-safe after-sib)))))))
+         (let ((after-sib (nth (1+ idx) sibs)))
+           (cons parent-id (cdr-safe after-sib))))))))
 
 (defun org-mode-google-tasks-sync--last-child-id (parent-marker)
   "Return the :GTASK_ID: of the last direct child heading under PARENT-MARKER.
-Nil if the parent has no synced children."
+Nil if the parent has no synced children.  Walks direct children
+\(level = parent-level + 1) only; deeper descendants are skipped,
+which `forward-line' alone cannot distinguish."
   (save-excursion
     (goto-char parent-marker)
     (org-back-to-heading t)
     (let ((parent-level (org-current-level))
           (last-id nil))
-      (save-excursion
-        (org-forward-heading-same-level 1)
-        (when (> (org-current-level) parent-level)
-          ;; We entered the subtree — walk to the last direct child.
-          (while (and (not (eobp))
-                      (looking-at "^\\*+ ")
-                      (> (org-current-level) parent-level))
-            (when (= (org-current-level) (1+ parent-level))
-              (let ((id (org-entry-get nil "GTASK_ID")))
-                (when id (setq last-id id))))
-            (forward-line 1))))
+      (when (org-goto-first-child)
+        (while (and (not (eobp))
+                    (= (org-current-level) (1+ parent-level)))
+          (let ((id (org-entry-get nil "GTASK_ID")))
+            (when id (setq last-id id)))
+          (unless (org-get-next-sibling)
+            (goto-char (point-max)))))
       last-id)))
 
 (defun org-mode-google-tasks-sync--compute-demote-params ()
@@ -877,7 +867,7 @@ appended as its last child.  Refuses if the heading has subtasks
           (level (org-current-level)))
       ;; Refuse if the task has child headings.
       (save-excursion
-        (forward-line 1)
+        (org-end-of-meta-data t)
         (when (and (not (eobp))
                    (looking-at "^\\*+ ")
                    (> (org-current-level) level))
@@ -889,8 +879,8 @@ appended as its last child.  Refuses if the heading has subtasks
                                        (equal a (marker-position (car b)))))))
         (when (or (null idx) (<= idx 0))
           (user-error "Cannot demote: no preceding sibling to nest under"))
-        (let* ((prev-sib (with-no-warnings (nth (1- idx) sibs)))
-               (new-parent-id (cdr-safe prev-sib))
+         (let* ((prev-sib (nth (1- idx) sibs))
+                (new-parent-id (cdr-safe prev-sib))
                (last-child-id
                 (when new-parent-id
                   (org-mode-google-tasks-sync--last-child-id
@@ -1028,7 +1018,7 @@ to `tasks.move' cleanly.  Refuses with a clear message."
   (if (not (org-mode-google-tasks-sync--synced-task-at-point-p))
       (funcall orig-fn)
     (user-error
-      "Subtree-wide promote/demote is not supported on synced tasks; use `C-c C-^' (org-move-subtree-up) / `C-c C-_' (org-move-subtree-down) on the parent instead"))))
+       "Subtree-wide promote/demote is not supported on synced tasks; use `C-c C-^' (org-move-subtree-up) / `C-c C-_' (org-move-subtree-down) on the parent instead")))
 
 (defun org-mode-google-tasks-sync--advice-move-up (orig-fn &rest _)
   "Advice for `org-move-subtree-up'.  ORIG-FN is the original."
