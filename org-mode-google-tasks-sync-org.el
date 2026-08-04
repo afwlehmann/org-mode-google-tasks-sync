@@ -354,7 +354,16 @@ LIST-ID is attached to each returned task.  Direct children
 are subtasks.  Each task's `parent-id' slot is inferred from the org
 heading hierarchy: if the immediate parent heading has a :GTASK_ID:,
 that's the parent-id; otherwise nil (top-level).  Headings at level
-parent+3 or deeper are local-only and not collected."
+parent+3 or deeper are local-only and not collected.
+
+Scope example, with PARENT-HEADING = `Tasks':
+
+    * Tasks
+    ** TODO a              collected (level parent+1)
+    *** TODO a-sub         collected subtask (level parent+2)
+    **** deeper            NOT collected (too deep)
+    * Other section        walk ends here
+    ** TODO unrelated      NOT collected"
   (with-current-buffer (find-file-noselect file)
     (save-excursion
       (goto-char (point-min))

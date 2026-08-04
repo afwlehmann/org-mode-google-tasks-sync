@@ -36,6 +36,24 @@ This package syncs **Google Tasks only** — not Google Calendar events.
 | Recurring tasks | ❌ Google Tasks API is read-only for recurrence |
 | `DEADLINE:` | ❌ Only `SCHEDULED:` maps to Google's `due` |
 
+### Sync scope
+
+```org
+* Tasks                       ← sync starts here
+** TODO Buy milk              synced
+*** TODO Buy oat milk         synced (subtask)
+**** Weird depth              NOT synced — too deep
+
+* Other section               ← sync stops here
+** TODO totally unrelated     NOT synced
+```
+
+Sync visits the subtree under the configured `PARENT-HEADING` only, up
+to two levels deep (top-level tasks plus one level of subtasks).  The
+first heading at the parent's own level — or shallower — ends the
+region; anything after is ignored.  Unrelated sections in the same file
+are never touched.
+
 ---
 
 ## Prerequisites
