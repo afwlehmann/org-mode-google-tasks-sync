@@ -178,6 +178,7 @@ Heading properties written by the package:
 | `:GTASK_UPDATED:` | The `updated` timestamp from Google's last response for this task. Server-authoritative; never compared to local clock. |
 | `:GTASK_ETAG:` | The ETag from Google's last response. Sent as `If-Match` on PATCH; on 412 mismatch the task is re-fetched and conflict resolution re-runs. |
 | `:GTASK_CONTENT_HASH:` | SHA-1 over a canonical projection of (title, notes, status, due). Stable across whitespace and property-drawer churn. Compared on every tick to detect local edits since the last sync. |
+| `:GTASK_PARENT_ID:` | Server `parent` task ID at last sync. Compared against the parent ID inferred from the current heading hierarchy to distinguish a local reparent (they differ, push direction) from a remote one (they match, apply direction). Absent for top-level tasks; not in the hash. |
 | `:GTASK_POSITION:` | Server `position` lexicographic-rank string. Used for sorting; not in the hash. |
 | `:GTASK_COMPLETED:` | Server `completed` RFC3339 timestamp. Sort key for DONE tasks; not in the hash. |
 | `:GTASK_LINKS:` | Server `links[]` array, JSON-encoded. Read-only display metadata populated by Gmail/Keep/Chat/Docs. Not in the hash; not pushable. |
@@ -518,6 +519,35 @@ programs.emacs.extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
 ```
 
 Or try it directly: `nix run github:afwlehmann/org-mode-google-tasks-sync#emacs`.
+
+---
+
+## Troubleshooting
+
+### Transient HTTP errors and rate limits
+
+Every request (list, insert, patch, delete, move) is retried automatically
+on transient failures: HTTP **429 / 500 / 502 / 503 / 504**, and curl-level
+transport errors (DNS / connection / timeout / SSL handshake / empty reply /
+recv failure). Retry uses exponential backoff with full jitter (uniform in
+[0.5 s, 2 s · 2⁻ⁿ]) and honors `Retry-After` up to a 60-second cap. Worst
+case, three attempts are made before the request surfaces to `*org-mode-google-tasks-sync-log*` as an error — so a single busy Google's rate-limit response doesn't kill a tick.
+
+Non-transient errors (400/404/412 handled differently, auth failures) are
+never retried: they'd just burn attempts.
+
+### HTTP 412 — ETag conflict on a push
+
+When your local edit and someone else's edit collide on the server's ETag,
+the sync PATCH returns 412. The API layer **does not blind-retry** — it fetches the live task and applies remote-wins: if your local version differs from the fetched copy, that losing side is quarantined to `*Google Tasks Conflicts*` first; the fresh copy is written in-place; a `ETag conflict resolved (remote-wins)` line lands in the log.  Config-permanent 412s (e.g. corrupted `:GTASK_ETAG:` on the heading) recur at every tick — re-push with stale metadata is impossible, so the fix is to pull first (`M-x org-mode-google-tasks-sync-full-sync`).
+
+### The log buffer
+
+Every pull, push, delete, conflict, retry, and error is logged to
+`*org-mode-google-tasks-sync-log*`. The first thing to check when a sync
+appears to misbehave. With `org-mode-google-tasks-sync-log-level` at
+`'debug`, JSON serialization details and extra API diagnostics are
+included.
 
 ---
 

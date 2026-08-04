@@ -698,10 +698,51 @@ parent's heading marker."
 (defun org-mode-google-tasks-sync-engine--apply-pull (list-id local remote)
   "Apply REMOTE fields onto LOCAL task struct in LIST-ID in-buffer."
   (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
-                remote list-id (org-mode-google-tasks-sync-org-task-marker local))))
+                 remote list-id (org-mode-google-tasks-sync-org-task-marker local))))
     (org-mode-google-tasks-sync-org-write-task task)
     (org-mode-google-tasks-sync-engine--log "Pulled: %s"
                                        (org-mode-google-tasks-sync-org-task-title task))))
+
+(defun org-mode-google-tasks-sync-engine--finalize-push-etag-conflict
+    (on-failure token list-id task error &optional on-success)
+  "Resolve a 412 ETag conflict on pushing TASK via remote-wins semantics.
+
+TOKEN authenticates the refetch; LIST-ID identifies the list.  Called
+by the API retry layer after a PATCH whose If-Match header no longer
+matches the server (someone else mutated the task since our last
+pull).  Refetches TASK via `tasks.get'; quarantines the local content
+when it differs from the fetched fresh copy (the loser in the
+conflict); writes the fetched copy to the buffer; then calls
+ON-SUCCESS — the push is finalized, but with the server's version of
+the data.  On fetch failure, logs and calls ON-FAILURE with ERROR
+\(the original 412 plz error), so the sync pipeline continues the
+same way an un-retryable push would."
+  (declare (indent 1))
+  (org-mode-google-tasks-sync-api-get-task
+   token list-id (org-mode-google-tasks-sync-org-task-id task)
+   (lambda (fresh)
+     (let ((local-differs
+            (not (equal
+                  (org-mode-google-tasks-sync-org-canonical-hash
+                   (org-mode-google-tasks-sync-engine--remote-task->struct
+                    fresh list-id nil))
+                  (org-mode-google-tasks-sync-org-canonical-hash task)))))
+       (when local-differs
+         (org-mode-google-tasks-sync-engine--quarantine
+          "local-overwritten-after-412" task))
+       (org-mode-google-tasks-sync-org-write-task
+        (org-mode-google-tasks-sync-engine--remote-task->struct
+         fresh list-id
+         (org-mode-google-tasks-sync-org-task-marker task)))
+       (org-mode-google-tasks-sync-engine--log
+        "ETag conflict resolved (remote-wins): %s"
+        (org-mode-google-tasks-sync-org-task-title task))
+       (when on-success (funcall on-success fresh))))
+   (lambda (fetch-err)
+     (org-mode-google-tasks-sync-engine--log
+      "412 finalization GET failed (%S); original push error: %S"
+      fetch-err error)
+     (when on-failure (funcall on-failure error)))))
 
 (defun org-mode-google-tasks-sync-engine--push-update (token list-id task &optional on-success)
   "Push TASK to Google in LIST-ID using TOKEN.  Fire-and-forget with logging.
@@ -709,29 +750,38 @@ When ON-SUCCESS is non-nil it is called with the response alist after
 the push succeeds and the local heading has been updated — used by
 the DONE-push-then-remove path to remove the heading once the server
 confirms the completion."
-  (org-mode-google-tasks-sync-api-patch-task
-   token list-id
-   (org-mode-google-tasks-sync-org-task-id task)
-   (cons (cons 'id (org-mode-google-tasks-sync-org-task-id task))
-         (org-mode-google-tasks-sync-engine--task->api-data task))
-   (org-mode-google-tasks-sync-org-task-etag task)
-    (lambda (resp)
-      (let ((updated (alist-get 'updated resp))
-            (etag (alist-get 'etag resp)))
-        (setf (org-mode-google-tasks-sync-org-task-updated task) updated)
-        (setf (org-mode-google-tasks-sync-org-task-etag task) etag)
-        (when (org-mode-google-tasks-sync-org-task-marker task)
-          (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
-            (save-excursion
-              (goto-char (org-mode-google-tasks-sync-org-task-marker task))
-              (org-mode-google-tasks-sync-org-write-task task)))))
-      (org-mode-google-tasks-sync-engine--log "Pushed: %s"
-                                         (org-mode-google-tasks-sync-org-task-title task))
-      (when on-success (funcall on-success resp)))
-   (lambda (err)
-     (org-mode-google-tasks-sync-engine--log "Push error: %S (task=%s)"
-                                        err
-                                        (org-mode-google-tasks-sync-org-task-title task)))))
+  (let ((on-failure
+         (lambda (err)
+           (org-mode-google-tasks-sync-engine--log "Push error: %S (task=%s)"
+                                              err
+                                              (org-mode-google-tasks-sync-org-task-title task)))))
+    (org-mode-google-tasks-sync-api-patch-task
+     token list-id
+     (org-mode-google-tasks-sync-org-task-id task)
+     (cons (cons 'id (org-mode-google-tasks-sync-org-task-id task))
+           (org-mode-google-tasks-sync-engine--task->api-data task))
+     (org-mode-google-tasks-sync-org-task-etag task)
+      (lambda (resp)
+        (let ((updated (alist-get 'updated resp))
+              (etag (alist-get 'etag resp)))
+          (setf (org-mode-google-tasks-sync-org-task-updated task) updated)
+          (setf (org-mode-google-tasks-sync-org-task-etag task) etag)
+          (when (org-mode-google-tasks-sync-org-task-marker task)
+            (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
+              (save-excursion
+                (goto-char (org-mode-google-tasks-sync-org-task-marker task))
+                (org-mode-google-tasks-sync-org-write-task task)))))
+        (org-mode-google-tasks-sync-engine--log "Pushed: %s"
+                                           (org-mode-google-tasks-sync-org-task-title task))
+        (when on-success (funcall on-success resp)))
+      on-failure
+      ;; On 412: refetch the live task and finalize remote-wins; do NOT
+      ;; blind-retry the stale PUT.  The lambda is the API-side on-412
+      ;; hook, called with the 412 plz-error; the closure binds the
+      ;; engine-level context (--finalize's on-failure).
+      (lambda (err)
+        (org-mode-google-tasks-sync-engine--finalize-push-etag-conflict
+         on-failure token list-id task err on-success)))))
 
 (defun org-mode-google-tasks-sync-engine--push-new (token list-id task &optional file)
   "POST a new TASK to Google in LIST-ID using TOKEN.
