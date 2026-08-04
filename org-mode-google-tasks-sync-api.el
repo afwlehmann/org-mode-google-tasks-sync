@@ -7,7 +7,7 @@
 
 ;; Thin wrappers around the Google Tasks v1 REST API using `plz' for HTTP.
 ;; Every public function takes a token struct and a pair of THEN/ELSE
-;; callbacks.  Pagination, rate-limit backoff, and ETag handling are here.
+;; callbacks.  Pagination is here; failures surface via ELSE callbacks.
 
 ;;; Code:
 
@@ -170,15 +170,6 @@ THEN is called with nil on success."
     :headers (org-mode-google-tasks-sync-api--auth-header token)
     :as 'string
     :then (lambda (_) (funcall then nil))
-    :else else))
-
-(defun org-mode-google-tasks-sync-api-get-task (token list-id task-id then else)
-  "GET TASK-ID in LIST-ID using TOKEN.  Used after 412 ETag conflicts."
-  (plz 'get (concat org-mode-google-tasks-sync-api--base-url
-                    "/lists/" list-id "/tasks/" task-id)
-    :headers (org-mode-google-tasks-sync-api--auth-header token)
-    :as (lambda () (org-mode-google-tasks-sync-api--parse-json (buffer-string)))
-    :then then
     :else else))
 
 (defun org-mode-google-tasks-sync-api-move-task
