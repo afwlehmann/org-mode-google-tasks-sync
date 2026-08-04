@@ -226,5 +226,48 @@ inferred from the org heading hierarchy."
                            (org-mode-google-tasks-sync-org-task-parent-id (nth 2 tasks))))))
       (delete-file file))))
 
+(ert-deftest org-mode-google-tasks-sync-org-test/write-task-persists-parent-id ()
+  "`write-task' persists :GTASK_PARENT_ID: when the struct carries a parent-id."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* Tasks
+** TODO Child
+"
+    (re-search-forward "^\\*\\* ")
+    (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      (setf (org-mode-google-tasks-sync-org-task-parent-id task) "parent-123")
+      (org-mode-google-tasks-sync-org-write-task task))
+    (should (equal "parent-123" (org-entry-get nil "GTASK_PARENT_ID")))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/write-task-clears-parent-id-when-nil ()
+  "`write-task' removes a stale :GTASK_PARENT_ID: when the struct is top-level."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* Tasks
+** TODO Child
+   :PROPERTIES:
+   :GTASK_PARENT_ID: old-parent
+   :END:
+"
+    (re-search-forward "^\\*\\* ")
+    (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      ;; parent-id slot stays nil (top-level in the struct).
+      (org-mode-google-tasks-sync-org-write-task task))
+    (should (null (org-entry-get nil "GTASK_PARENT_ID")))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/stored-parent-id-round-trip ()
+  "`stored-parent-id' reads back what `write-task' persisted.
+This is the property the engine compares against the live hierarchy to
+tell local reparents (differ) from remote ones (match)."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* Tasks
+** TODO Child
+"
+    (re-search-forward "^\\*\\* ")
+    (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      (should (null (org-mode-google-tasks-sync-org-stored-parent-id task)))
+      (setf (org-mode-google-tasks-sync-org-task-parent-id task) "parent-xyz")
+      (org-mode-google-tasks-sync-org-write-task task)
+      (should (equal "parent-xyz"
+                     (org-mode-google-tasks-sync-org-stored-parent-id task))))))
+
 (provide 'org-mode-google-tasks-sync-org-test)
 ;;; org-mode-google-tasks-sync-org-test.el ends here
