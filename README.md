@@ -138,6 +138,16 @@ Each entry is `(LIST-ID . (FILE . PARENT-HEADING))`:
 - `FILE` is the absolute or tilde-expanded path to an org file. The file must exist; if the heading doesn't yet, you'll create it manually before the first sync.
 - `PARENT-HEADING` is the **exact text** of the heading under which synced tasks live. Sync touches **only direct children** of this heading — anything else in the file is left alone. This lets you put non-synced TODOs in the same file.
 
+**The match is literal.** In the org buffer, write the heading as stars + one space + the exact `PARENT-HEADING` text, nothing else:
+
+| In the buffer | With `PARENT-HEADING` of `"Tasks"` |
+|---|---|
+| `* Tasks` | ✅ matches |
+| `* Tasks :work:` | ❌ no match (tags make the raw text `"Tasks :work:"`) |
+| `* TODO Tasks` | ❌ no match (TODO keyword is part of the raw text) |
+| `*  Tasks` (double space) | ❌ no match |
+| ❌ not present at all | 🔧 engine auto-creates `* Tasks` at end-of-file on first sync |
+
 Example file:
 
 ```org
