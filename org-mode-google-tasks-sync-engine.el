@@ -101,16 +101,20 @@ that would be too noisy at the default `info' level."
 
 (defun org-mode-google-tasks-sync-engine--remote-task->struct (remote list-id existing-marker)
   "Build a task struct from a REMOTE alist in LIST-ID.
-Carries EXISTING-MARKER if known."
+Carries EXISTING-MARKER if known.  Trailing `@' hashtags in the
+remote `title' are decoded into the struct's `tags' slot and stripped
+from the title — see `org-mode-google-tasks-sync-org-title-decode-tags'."
   (let* ((links-raw (alist-get 'links remote))
          (links-json (when links-raw
                        (json-serialize links-raw
                                        :null-object nil
-                                       :false-object :false))))
+                                       :false-object :false)))
+         (decoded (org-mode-google-tasks-sync-org-title-decode-tags
+                   (or (alist-get 'title remote) ""))))
     (make-org-mode-google-tasks-sync-org-task
      :id        (alist-get 'id remote)
      :list-id   list-id
-     :title     (or (alist-get 'title remote) "")
+     :title     (car decoded)
      :notes     (or (alist-get 'notes remote) "")
      :status    (if (equal (alist-get 'status remote) "completed")
                     'completed 'needsAction)
@@ -123,6 +127,7 @@ Carries EXISTING-MARKER if known."
      :completed (alist-get 'completed remote)
      :links     links-json
      :web-view-link (alist-get 'webViewLink remote)
+     :tags      (cdr decoded)
      :marker    existing-marker)))
 
 (defun org-mode-google-tasks-sync-engine--remote-due (remote)
@@ -132,8 +137,14 @@ Carries EXISTING-MARKER if known."
       (substring due 0 10))))
 
 (defun org-mode-google-tasks-sync-engine--task->api-data (task)
-  "Convert a TASK struct to the alist payload for the Tasks API."
-  (let ((data `((title . ,(or (org-mode-google-tasks-sync-org-task-title task) ""))
+  "Convert a TASK struct to the alist payload for the Tasks API.
+TASK's tags are encoded into the pushed `title' as trailing `@' hashtags
+\(sorted, whitespace-free tags only); on pull the hashes are stripped
+and turned back into org tags.  Users of the Google Tasks web UI see
+the hashtags at the end of the title."
+  (let ((data `((title . ,(org-mode-google-tasks-sync-org-title-encode-tags
+                           (org-mode-google-tasks-sync-org-task-title task)
+                           (org-mode-google-tasks-sync-org-task-tags task)))
                 (notes . ,(or (org-mode-google-tasks-sync-org-task-notes task) ""))
                 (status . ,(symbol-name
                             (or (org-mode-google-tasks-sync-org-task-status task)

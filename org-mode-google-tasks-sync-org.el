@@ -60,7 +60,7 @@ Read-only display metadata.  Not in the canonical hash; not pushable.")
 (cl-defstruct org-mode-google-tasks-sync-org-task
   "In-memory representation of a synced task heading."
   id            ; string or nil for unsynced local tasks
-  list-id       ; string
+  list-id       ; string or nil for encoder tests that skip task lists
   title         ; string, never includes TODO keyword or priority cookie
   notes         ; string, may be empty
   status        ; symbol: 'needsAction or 'completed
@@ -73,6 +73,7 @@ Read-only display metadata.  Not in the canonical hash; not pushable.")
   completed     ; string RFC3339 from server for DONE tasks, or nil
   links         ; string JSON-encoded links array from server, or nil
   web-view-link ; string URL to task in Google web UI, or nil
+  tags          ; list of strings (org tags, sorted); nil for untagged
   marker)       ; buffer marker pointing at the heading, or nil
 
 (defun org-mode-google-tasks-sync-org--priority-cookie-re ()
@@ -84,6 +85,50 @@ Read-only display metadata.  Not in the canonical hash; not pushable.")
   (replace-regexp-in-string (concat "\\`" (org-mode-google-tasks-sync-org--priority-cookie-re))
                             ""
                             title))
+
+;;; Tag <-> title encoding (`@' suffix)
+
+(defun org-mode-google-tasks-sync-org-title-encode-tags (title tags)
+  "Return TITLE with TAGS appended as `@' hashtags, in a canonical form.
+TAGS is a list of strings (from `org-get-tags').  Spaces are the
+hashtag separator, so any tag containing whitespace is silently
+dropped.  When TAGS is nil, returns TITLE unchanged — required so
+the canonical-hash projection for untagged tasks stays byte-identical
+with pre-tag-sync values (avoids a spurious push-storm on upgrade)."
+  (let* ((clean (cl-remove-if (lambda (tg)
+                                 (or (string-empty-p tg)
+                                     (string-match-p "[ \t]" tg)))
+                               tags))
+         (sorted (sort (copy-sequence clean) #'string<)))
+    (if (null sorted)
+        (or title "")
+      (concat (or title "") " " (mapconcat (lambda (tg) (concat "@" tg))
+                                           sorted " ")))))
+
+(defun org-mode-google-tasks-sync-org-title-decode-tags (title)
+  "Extract trailing `@' hashtag words from TITLE.
+Returns (BASE-TITLE . TAGS) where TAGS is a list of strings in
+source order.  Hashtags are the contiguous trailing run of
+whitespace-separated tokens that start with `@'; a mid-title `@' (or
+an `@' mid-word like `user@host') stays part of the title.  When no
+hashtags are present, TAGS is nil."
+  (let ((words (split-string title)))
+    (if (null words)
+        (cons (or title "") nil)
+      (let* ((n (length words))
+             (first-tag-idx
+              (cl-loop for i from (1- n) downto 0
+                       while (and (string-prefix-p "@" (nth i words))
+                                  (> (length (nth i words)) 1))
+                       finally return (1+ i))))
+        ;; first-tag-idx is the index of the first hashtag in the
+        ;; contiguous trailing run, or n when no hashtags.
+        (if (= first-tag-idx n)
+            (cons title nil)
+          (let ((base (string-join (cl-subseq words 0 first-tag-idx) " "))
+                (tags (mapcar (lambda (w) (substring w 1))
+                              (cl-subseq words first-tag-idx n))))
+            (cons base tags)))))))
 
 (defun org-mode-google-tasks-sync-org--todo-state (element)
   "Return the TODO state symbol for headline ELEMENT.
@@ -150,14 +195,23 @@ until neither prefix matches."
         :completed (org-entry-get nil org-mode-google-tasks-sync-org--prop-completed)
         :links     (org-entry-get nil org-mode-google-tasks-sync-org--prop-links)
         :web-view-link (org-entry-get nil org-mode-google-tasks-sync-org--prop-web-view-link)
+        :tags      (org-get-tags nil t)
         :marker    (point-marker)))))
 
 (defun org-mode-google-tasks-sync-org-canonical-hash (task)
   "Return a stable SHA-1 hash over the synced fields of TASK.
-Excludes priority cookies, IDs, etags, timestamps."
+Excludes priority cookies, IDs, etags, timestamps.
+
+Includes tags when TASK has any — encoded as `@' hashtag words appended
+to the title (see `org-mode-google-tasks-sync-org-title-encode-tags').
+For untagged tasks the projection is byte-identical to pre-tag-sync
+values: the title slot is used as-is, so an upgrade does not trigger a
+spurious `local-changed' push for every heading."
   (let ((projection
          (string-join
-          (list (or (org-mode-google-tasks-sync-org-task-title task) "")
+          (list (org-mode-google-tasks-sync-org-title-encode-tags
+                 (org-mode-google-tasks-sync-org-task-title task)
+                 (org-mode-google-tasks-sync-org-task-tags task))
                 (or (org-mode-google-tasks-sync-org-task-notes task) "")
                 (symbol-name (or (org-mode-google-tasks-sync-org-task-status task)
                                  'needsAction))
@@ -184,6 +238,7 @@ the target heading."
     (org-back-to-heading t)
     (org-mode-google-tasks-sync-org--replace-title
      (org-mode-google-tasks-sync-org-task-title task))
+    (org-set-tags (org-mode-google-tasks-sync-org-task-tags task))
     (let ((target (org-mode-google-tasks-sync-org-task-status task)))
       (cond
        ((and (eq target 'completed) (not (org-entry-is-done-p)))

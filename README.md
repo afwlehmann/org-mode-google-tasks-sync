@@ -30,6 +30,7 @@ This package syncs **Google Tasks only** — not Google Calendar events.
 | `SCHEDULED:` date | ✅ ↔ Google `due` (date only — **time of day is dropped**) |
 | Subtask nesting (two levels) | ✅ ↔ Google `parent` — top-level tasks and one level of subtasks. Reparenting conflicts resolved remote-wins. |
 | `[#A]` / `[#B]` / `[#C]` priority cookies | ❌ Local-only — stripped from title on push, preserved on pull |
+| Org tags (`:tag1:` `:tag2:`) | ✅ Encoded as trailing `@` hashtags in the pushed title (e.g. `Buy milk @errands @work`), decoded back into org tags on pull. Sorted; whitespace-containing tags are silently dropped. |
 | Tag ordering / `position` | ✅ Via org's own `M-↑`/`M-↓`/`M-←`/`M-→` keys (server-first, no race) |
 | Links / attachments (`links[]`, `webViewLink`) | 📖 Read-only display — populated by Gmail/Keep/Chat/Docs; stored as `:GTASK_LINKS:` / `:GTASK_WEB_LINK:` properties.  Not pushable via the API. |
 | Starred | ❌ No `starred` field in the Tasks API v1 |
