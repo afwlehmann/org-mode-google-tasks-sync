@@ -119,6 +119,8 @@
           buildInputs = [
             emacsForDev
             pkgs.gnupg
+            pkgs.gh
+            pkgs.shellcheck
           ]
           ++ pre-commit-check.enabledPackages;
           shellHook = ''
@@ -134,6 +136,7 @@
             ${pre-commit-check.shellHook}
             echo "org-mode-google-tasks-sync dev shell"
             echo "  emacs (with plz + oauth2): ${emacsForDev}/bin/emacs"
+            echo "  gh: ${pkgs.gh}/bin/gh"
             echo "  run tests: emacs --batch -l test/run-tests.el -f ert-run-tests-batch-and-exit"
             echo "  git hooks auto-installed (convco + emacs-lint-checks)"
           '';

@@ -12,6 +12,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job: `DeterminateSystems/magic-nix-cache-action` (free for public repos)
+# shares the GitHub-hosted cache of /nix/store across jobs and across pushes.
+# First push warms it; subsequent runs in the same matrix cell are cache-hits.
+# `nix develop --command` is used in every job so the CI exercises the same
+# dev environment contributors use.
+
 jobs:
   shellcheck:
     name: shellcheck (${{ matrix.os }})
@@ -24,11 +30,21 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # FlakeHub disabled: no registry lookups, no FlakeHub
+          # binary cache — everything resolves via github: inputs
+          # and cache.nixos.org (plus Magic Nix Cache below).
+          flakehub: false
+      - name: Cache nix store
+        uses: actions/cache@v4
+        with:
+          path: /nix/store
+          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
       - name: shellcheck bootstrap.sh
         id: shellcheck
         run: |
           set -o pipefail
-          nix run nixpkgs#shellcheck -- bootstrap.sh 2>&1 | tee shellcheck.log
+          nix develop --command shellcheck bootstrap.sh 2>&1 | tee shellcheck.log
       - name: Job summary
         if: always()
         run: |
@@ -57,10 +73,21 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # FlakeHub disabled: no registry lookups, no FlakeHub
+          # binary cache — everything resolves via github: inputs
+          # and cache.nixos.org (plus Magic Nix Cache below).
+          flakehub: false
+      - name: Cache nix store
+        uses: actions/cache@v4
+        with:
+          path: /nix/store
+          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
       - name: Evaluate flake outputs
         id: eval
         run: |
-          nix flake check --no-build --print-build-logs 2>&1 | tee eval.log
+          nix develop --command nix flake check --no-build --print-build-logs \
+            2>&1 | tee eval.log
       - name: Job summary
         if: always()
         run: |
@@ -87,19 +114,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest, system: x86_64-linux }
-          - { os: macos-latest,  system: aarch64-darwin }
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # FlakeHub disabled: no registry lookups, no FlakeHub
+          # binary cache — everything resolves via github: inputs
+          # and cache.nixos.org (plus Magic Nix Cache below).
+          flakehub: false
+      - name: Cache nix store
+        uses: actions/cache@v4
+        with:
+          path: /nix/store
+          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
       - name: Run ert tests
         id: ert
         run: |
-          nix build .#checks.${{ matrix.system }}.tests \
-            --print-build-logs --no-link 2>&1 | tee test.log
+          nix develop --command emacs --batch \
+            -l test/run-tests.el -f ert-run-tests-batch-and-exit \
+            2>&1 | tee test.log
       - name: Job summary
         if: always()
         run: |
@@ -118,6 +154,50 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  lint:
+    name: lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # FlakeHub disabled: no registry lookups, no FlakeHub
+          # binary cache — everything resolves via github: inputs
+          # and cache.nixos.org (plus Magic Nix Cache below).
+          flakehub: false
+      - name: Cache nix store
+        uses: actions/cache@v4
+        with:
+          path: /nix/store
+          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
+      - name: Byte-compile + checkdoc lint
+        id: lint
+        run: |
+          nix develop --command emacs --batch -L . \
+            -l hooks/lint.el -f org-mode-google-tasks-sync-lint \
+            2>&1 | tee lint.log
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## lint"
+            echo
+            if [ "${{ steps.lint.outcome }}" = "success" ]; then
+              echo "✅ Byte-compile + checkdoc clean."
+            else
+              echo "❌ Lint failed."
+              echo
+              echo '```'
+              tail -40 lint.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
     name: nix build (${{ matrix.os }})
     strategy:
@@ -129,11 +209,22 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # FlakeHub disabled: no registry lookups, no FlakeHub
+          # binary cache — everything resolves via github: inputs
+          # and cache.nixos.org (plus Magic Nix Cache below).
+          flakehub: false
+      - name: Cache nix store
+        uses: actions/cache@v4
+        with:
+          path: /nix/store
+          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
       - name: Build the package
         id: build
         run: |
-          nix build .#default --print-build-logs --no-link \
-            --print-out-paths 2>&1 | tee build.log
+          nix develop --command nix build .#default \
+            --print-build-logs --no-link --print-out-paths \
+            2>&1 | tee build.log
       - name: Job summary
         if: always()
         run: |

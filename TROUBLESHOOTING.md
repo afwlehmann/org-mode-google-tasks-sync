@@ -1,6 +1,14 @@
 # Troubleshooting
 
-When the background tick fails, the error lands in `*org-mode-google-tasks-sync-log*` rather than `*Messages*` — open that buffer first with `M-x org-mode-google-tasks-sync-show-log`.
+When the background tick fails, the error lands in
+`*org-mode-google-tasks-sync-log*` rather than `*Messages*` — open that
+buffer first with `M-x org-mode-google-tasks-sync-show-log`.
+
+For curated troubleshooting content, see the [Troubleshooting
+section](README.md#troubleshooting) of the README — it covers the retry
+layer (429 / 5xx / `Retry-After`), the HTTP-412 ETag conflict path, and
+the log buffer.  The sections below cover the remaining failure modes that
+aren't network- or conflict-related.
 
 ## `(epg-error "no usable configuration" OpenPGP)`
 
@@ -45,8 +53,16 @@ If those don't agree, `executable-find` is the one to fix.
 
 ## Sync runs but nothing changes
 
-Verify `org-mode-google-tasks-sync-map` has entries and that the parent heading text in your config matches the heading in the file exactly — case-sensitive, no leading stars.  Check `*org-mode-google-tasks-sync-log*` for `Skip tick` lines.
+Verify `org-mode-google-tasks-sync-map` has entries and that the parent
+heading text in your config matches the heading in the file exactly —
+case-sensitive, no leading stars.  See also the "literal-match table" in
+the README's Configuration step: tags or TODO keywords on the parent
+heading break the match silently.  Check `*org-mode-google-tasks-sync-log*`
+for `Skip tick` lines.
 
 ## Refresh token revoked at Google
 
-After visiting https://myaccount.google.com/permissions and removing the app, the next tick will fail authenticating.  Re-run `M-x org-mode-google-tasks-sync-authorize` (or the `bootstrap` helper if you're declaratively-managed) to mint a fresh token.
+After visiting https://myaccount.google.com/permissions and removing the
+app, the next tick will fail authenticating.  Re-run `M-x
+org-mode-google-tasks-sync-authorize` (or the `bootstrap` helper if you're
+declaratively-managed) to mint a fresh token.
