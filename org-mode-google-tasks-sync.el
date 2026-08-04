@@ -639,9 +639,18 @@ Populates `org-mode-google-tasks-sync-map'."
 
 ;;;###autoload
 (defun org-mode-google-tasks-sync-full-sync ()
-  "Run a full reconciliation pass: detect long-tombstoned deletions."
+  "Run a full reconciliation pass: detect long-tombstoned deletions.
+When called interactively, switches to the org buffer of the first
+entry of `org-mode-google-tasks-sync-map' afterwards; the
+non-interactive path (e.g. from Lisp code or the tick) does not
+touch window configuration."
   (interactive)
-  (org-mode-google-tasks-sync-engine-run 'full))
+  (org-mode-google-tasks-sync-engine-run 'full)
+  (when (and (called-interactively-p 'interactive)
+             org-mode-google-tasks-sync-map)
+    (let ((file (cadr (car org-mode-google-tasks-sync-map))))
+      (when (and file (file-exists-p file))
+        (pop-to-buffer (find-file-noselect file))))))
 
 ;;;###autoload
 (defun org-mode-google-tasks-sync-show-log ()
