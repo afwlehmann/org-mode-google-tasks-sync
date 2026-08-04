@@ -47,6 +47,12 @@ status (which IS in the hash) covers the meaningful state change.")
 Read-only display metadata populated by Gmail, Keep, Chat, Docs.
 Not in the canonical hash; not pushable via the Tasks API.")
 
+(defconst org-mode-google-tasks-sync-org--prop-parent-id "GTASK_PARENT_ID"
+  "Property holding the Google `parent' task ID at last successful sync.
+Sync-state (not in the canonical hash).  Compared against the parent
+task ID inferred from the current heading hierarchy to detect local
+reparent changes.")
+
 (defconst org-mode-google-tasks-sync-org--prop-web-view-link "GTASK_WEB_LINK"
   "Property holding the server `webViewLink' URL to the task in Google's web UI.
 Read-only display metadata.  Not in the canonical hash; not pushable.")
@@ -194,6 +200,8 @@ the target heading."
                    (org-mode-google-tasks-sync-org-task-id task))
     (org-entry-put nil org-mode-google-tasks-sync-org--prop-list
                    (org-mode-google-tasks-sync-org-task-list-id task))
+    (org-mode-google-tasks-sync-org-write-parent-id-at-point
+     (org-mode-google-tasks-sync-org-task-parent-id task))
     (when (org-mode-google-tasks-sync-org-task-updated task)
       (org-entry-put nil org-mode-google-tasks-sync-org--prop-updated
                      (org-mode-google-tasks-sync-org-task-updated task)))
@@ -301,6 +309,30 @@ heading (i.e. a top-level task) or when the parent heading has no
     (org-back-to-heading t)
     (when (org-up-heading-safe)
       (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))))
+
+(defun org-mode-google-tasks-sync-org-write-parent-id-at-point (parent-id)
+  "Write PARENT-ID as the :GTASK_PARENT_ID: property of the heading at point.
+Removes the property when PARENT-ID is nil (top-level task)."
+  (save-excursion
+    (org-back-to-heading t)
+    (if parent-id
+        (org-entry-put nil org-mode-google-tasks-sync-org--prop-parent-id
+                       parent-id)
+      (org-entry-delete nil org-mode-google-tasks-sync-org--prop-parent-id))))
+
+(defun org-mode-google-tasks-sync-org-stored-parent-id (task)
+  "Return the :GTASK_PARENT_ID: stored on TASK's heading at last sync, or nil.
+TASK is an `org-mode-google-tasks-sync-org-task'.  This is the
+server's `parent' value as last recorded, used to distinguish a local
+reparent (hierarchy changed since the property was written) from a
+remote one (hierarchy unchanged, but the remote `parent' differs)."
+  (let ((m (org-mode-google-tasks-sync-org-task-marker task)))
+    (when (and m (marker-buffer m))
+      (with-current-buffer (marker-buffer m)
+        (save-excursion
+          (goto-char m)
+          (org-back-to-heading t)
+          (org-entry-get nil org-mode-google-tasks-sync-org--prop-parent-id))))))
 
 (defun org-mode-google-tasks-sync-org--prev-sibling-id-at-point ()
   "Return :GTASK_ID: of the sibling immediately before the heading at point.

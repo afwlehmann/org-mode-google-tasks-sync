@@ -497,66 +497,102 @@ remote `parent', not under PARENT-MARKER."
       ((null local)
        (unless (and (not (org-mode-google-tasks-sync-engine--keep-done-p))
                     (org-mode-google-tasks-sync-engine--remote-completed-p remote))
-         (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
-                       remote list-id nil)))
-           ;; For subtasks, insert under the parent task's heading, not
-           ;; the configured parent heading.  Look up by :GTASK_ID:.
-           (let ((insert-marker
-                  (if remote-parent
-                      (or (when (gethash remote-parent local-by-id)
-                            (org-mode-google-tasks-sync-org-task-marker
-                             (gethash remote-parent local-by-id)))
-                          (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
-                           file remote-parent))
-                    parent-marker)))
-             (when insert-marker
-               (org-mode-google-tasks-sync-org-insert-task-under insert-marker task)
-               (org-mode-google-tasks-sync-engine--log "Pulled new: %s"
-                                                  (org-mode-google-tasks-sync-org-task-title task)))))))
+          (let* ((task (org-mode-google-tasks-sync-engine--remote-task->struct
+                        remote list-id nil)))
+            ;; For subtasks, insert under the parent task's heading, not
+            ;; the configured parent heading.  Look up by :GTASK_ID:.
+            ;; If the parent can't be found locally (e.g. it was deleted
+            ;; on this side but the child survived remotely), insert the
+            ;; orphan at top level and warn rather than silently dropping
+            ;; it.
+            (let* ((found-parent
+                    (and remote-parent
+                         (or (when (gethash remote-parent local-by-id)
+                               (org-mode-google-tasks-sync-org-task-marker
+                                (gethash remote-parent local-by-id)))
+                             (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
+                              file remote-parent))))
+                   (insert-marker (or found-parent parent-marker)))
+              (when (and remote-parent (not found-parent))
+                (org-mode-google-tasks-sync-engine--log
+                 "WARN: orphan subtask %s (parent %s not found locally); inserted at top level"
+                 (org-mode-google-tasks-sync-org-task-title task)
+                 remote-parent)
+                (display-warning 'org-mode-google-tasks-sync
+                                 (format "Orphan subtask %S inserted at top level (parent not found)"
+                                         (org-mode-google-tasks-sync-org-task-title task))
+                                 :warning))
+              (when insert-marker
+                (org-mode-google-tasks-sync-org-insert-task-under insert-marker task)
+                (org-mode-google-tasks-sync-engine--log "Pulled new: %s"
+                                                    (org-mode-google-tasks-sync-org-task-title task)))))))
      (t
       (progn
-       (let* ((local-parent (org-mode-google-tasks-sync-org-task-parent-id local))
-              (parent-changed (not (equal remote-parent local-parent))))
-        (when parent-changed
-          ;; Reparenting detected.  Resolve: if remote changed (remote
-          ;; `updated' differs from stored), remote wins — move the
-          ;; local heading under the remote's parent.  If local moved
-          ;; (local file mtime is newer), push via tasks.move.
-          (let* ((remote-changed (not (equal
-                                       (alist-get 'updated remote)
-                                       (org-mode-google-tasks-sync-org-task-updated local))))
-                 (local-mtime (and (org-mode-google-tasks-sync-org-task-marker local)
-                                   (org-mode-google-tasks-sync-engine--marker-mtime
-                                    (org-mode-google-tasks-sync-org-task-marker local))))
-                 (remote-newer (org-mode-google-tasks-sync-engine--remote-newer-p
-                                local-mtime (alist-get 'updated remote))))
-            (cond
-             ((and remote-changed remote-newer)
-              ;; Remote reparented; move local heading under the new parent.
-              (org-mode-google-tasks-sync-engine--move-local-heading
-               local remote-parent file)
-              (org-mode-google-tasks-sync-engine--log
-               "Reparented (remote): %s -> parent=%s"
-               (org-mode-google-tasks-sync-org-task-title local)
-               (or remote-parent "<top-level>")))
-              (t
-               ;; Local reparented; push to Google via tasks.move.
-               ;; Pass local-parent as :new-parent-id (not :previous-id,
-               ;; which is for sibling reordering, not reparenting).
-               (org-mode-google-tasks-sync-api-move-task
-                token list-id id
-                (lambda (resp)
-                  (setf (org-mode-google-tasks-sync-org-task-updated local)
-                        (alist-get 'updated resp))
-                  (org-mode-google-tasks-sync-engine--log
-                   "Reparented (local push): %s -> parent=%s"
-                   (org-mode-google-tasks-sync-org-task-title local)
-                   (or local-parent "<top-level>")))
-                (lambda (err)
-                  (org-mode-google-tasks-sync-engine--log
-                   "Reparent push error: %S (task=%s)"
-                   err (org-mode-google-tasks-sync-org-task-title local)))
-                local-parent nil))))))
+        (let* ((local-parent (org-mode-google-tasks-sync-org-task-parent-id local))
+               (stored-parent
+                (org-mode-google-tasks-sync-org-stored-parent-id local))
+               (parent-changed (not (equal remote-parent local-parent)))
+               (local-moved (not (equal stored-parent local-parent))))
+         (when parent-changed
+           ;; Reparenting detected.  Who moved?  Compare the current
+           ;; hierarchy-derived parent against the stored
+           ;; :GTASK_PARENT_ID: from the last sync:
+           ;; - Equal: the user didn't move it locally; remote wins.
+           ;; - Different: the user reparented locally; push unless the
+           ;;   remote also moved and is newer.
+           (let* ((remote-changed (not (equal
+                                        (alist-get 'updated remote)
+                                        (org-mode-google-tasks-sync-org-task-updated local))))
+                  (local-mtime (and (org-mode-google-tasks-sync-org-task-marker local)
+                                    (org-mode-google-tasks-sync-engine--marker-mtime
+                                     (org-mode-google-tasks-sync-org-task-marker local))))
+                  (remote-newer (org-mode-google-tasks-sync-engine--remote-newer-p
+                                 local-mtime (alist-get 'updated remote))))
+             (cond
+              ((not local-moved)
+               ;; Local hierarchy untouched since last sync: remote wins.
+               (org-mode-google-tasks-sync-engine--move-local-heading
+                local remote-parent file)
+               (org-mode-google-tasks-sync-engine--log
+                "Reparented (remote): %s -> parent=%s"
+                (org-mode-google-tasks-sync-org-task-title local)
+                (or remote-parent "<top-level>")))
+              ((and remote-changed remote-newer)
+               ;; Both moved, remote newer: remote wins.
+               (org-mode-google-tasks-sync-engine--move-local-heading
+                local remote-parent file)
+               (org-mode-google-tasks-sync-engine--log
+                "Reparented (remote, conflict): %s -> parent=%s"
+                (org-mode-google-tasks-sync-org-task-title local)
+                (or remote-parent "<top-level>")))
+               (t
+                ;; Local moved (and remote didn't, or local is newer):
+                ;; push to Google via tasks.move.  Pass local-parent as
+                ;; :new-parent-id (not :previous-id, which is for sibling
+                ;; reordering, not reparenting).
+                (org-mode-google-tasks-sync-api-move-task
+                 token list-id id
+                  (lambda (resp)
+                    (setf (org-mode-google-tasks-sync-org-task-updated local)
+                          (alist-get 'updated resp))
+                    ;; Bring the stored :GTASK_PARENT_ID: in line with
+                    ;; the heading's (already moved) position.
+                    (let ((m (org-mode-google-tasks-sync-org-task-marker local)))
+                      (when (and m (marker-buffer m))
+                        (with-current-buffer (marker-buffer m)
+                          (save-excursion
+                            (goto-char m)
+                            (org-mode-google-tasks-sync-org-write-parent-id-at-point
+                             local-parent)))))
+                    (org-mode-google-tasks-sync-engine--log
+                     "Reparented (local push): %s -> parent=%s"
+                     (org-mode-google-tasks-sync-org-task-title local)
+                     (or local-parent "<top-level>")))
+                 (lambda (err)
+                   (org-mode-google-tasks-sync-engine--log
+                    "Reparent push error: %S (task=%s)"
+                    err (org-mode-google-tasks-sync-org-task-title local)))
+                 local-parent nil))))))
       (let* ((local-changed (not (equal
                                   (org-mode-google-tasks-sync-org-canonical-hash local)
                                   (org-mode-google-tasks-sync-org-task-hash local))))
@@ -631,10 +667,18 @@ parent's heading marker."
                   (let ((new-level (1+ (org-current-level))))
                     (org-end-of-subtree t t)
                     (unless (bolp) (insert "\n"))
-                    (let ((adjusted
-                           (org-mode-google-tasks-sync-engine--adjust-heading-level
-                            subtree-text old-level new-level)))
-                      (insert adjusted))))))))))))
+                    (let* ((adjusted
+                            (org-mode-google-tasks-sync-engine--adjust-heading-level
+                             subtree-text old-level new-level))
+                           (insert-point (point)))
+                      (insert adjusted)
+                      ;; Persist :GTASK_PARENT_ID: on the freshly moved
+                      ;; heading so the next tick sees its hierarchy as
+                      ;; matching the last-synced state.
+                      (save-excursion
+                         (goto-char insert-point)
+                         (org-mode-google-tasks-sync-org-write-parent-id-at-point
+                          new-parent-id)))))))))))))
 
 (defun org-mode-google-tasks-sync-engine--adjust-heading-level (text old-level new-level)
   "Adjust the heading level stars in TEXT from OLD-LEVEL to NEW-LEVEL."
