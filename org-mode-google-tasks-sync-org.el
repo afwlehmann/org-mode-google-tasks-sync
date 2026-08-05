@@ -195,8 +195,21 @@ until neither prefix matches."
         :completed (org-entry-get nil org-mode-google-tasks-sync-org--prop-completed)
         :links     (org-entry-get nil org-mode-google-tasks-sync-org--prop-links)
         :web-view-link (org-entry-get nil org-mode-google-tasks-sync-org--prop-web-view-link)
-        :tags      (org-get-tags nil t)
-        :marker    (point-marker)))))
+         :tags      (org-get-tags nil t)
+         :marker    (org-mode-google-tasks-sync-org--sticky-marker)))))
+
+(defun org-mode-google-tasks-sync-org--sticky-marker ()
+  "Return a `point-marker' at point that advances past inserted text.
+`org-sort-entries' and other org operations delete a region and
+re-insert text at the same position; a default (insertion-type nil)
+marker stays before the inserted text and can end up pointing at a
+different heading after the sort.  Insertion-type t makes the
+marker ride with the heading it was placed on, so a deferred async
+callback (e.g. `--push-new's :then) can still locate the right
+heading to write back to."
+  (let ((m (point-marker)))
+    (set-marker-insertion-type m t)
+    m))
 
 (defun org-mode-google-tasks-sync-org-canonical-hash (task)
   "Return a stable SHA-1 hash over the synced fields of TASK.
@@ -351,7 +364,7 @@ Returns the marker of the new heading."
                 (or (org-mode-google-tasks-sync-org-task-title task) "") "\n")
         (let ((new-marker (save-excursion
                             (forward-line -1)
-                            (point-marker))))
+                            (org-mode-google-tasks-sync-org--sticky-marker))))
           (setf (org-mode-google-tasks-sync-org-task-marker task) new-marker)
           (goto-char new-marker)
           (org-mode-google-tasks-sync-org-write-task task)

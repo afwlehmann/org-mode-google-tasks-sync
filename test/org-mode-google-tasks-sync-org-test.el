@@ -316,5 +316,32 @@ Old body.
     (should (re-search-forward "New body" nil t))
     (should-not (re-search-forward "Old body" nil t))))
 
+(ert-deftest org-mode-google-tasks-sync-org-test/read-task-marker-is-sticky ()
+  "Task struct markers use insertion-type t so they ride with the
+heading across org's delete+insert operations (e.g. `org-sort-entries').
+Regression for the buffer-clobber bug where a post-sort async
+`write-task' landed on the wrong heading."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* Tasks
+** TODO A
+** TODO B
+"
+    (re-search-forward "^\\*\\* TODO B")
+    (beginning-of-line)
+    (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      (let ((m (org-mode-google-tasks-sync-org-task-marker task)))
+        (should (marker-insertion-type m)))
+      ;; Sort children of * Tasks alphabetically (A stays first, B stays
+      ;; second — no content change).  After the sort the marker must
+      ;; still point at the B heading.
+      (goto-char (point-min))
+      (org-sort-entries nil ?a)
+      (should (org-at-heading-p))
+      (goto-char (org-mode-google-tasks-sync-org-task-marker task))
+      (org-back-to-heading t)
+      (should (equal "B"
+                     (org-element-property
+                      :raw-value (org-element-at-point)))))))
+
 (provide 'org-mode-google-tasks-sync-org-test)
 ;;; org-mode-google-tasks-sync-org-test.el ends here
