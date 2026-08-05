@@ -269,5 +269,52 @@ tell local reparents (differ) from remote ones (match)."
       (should (equal "parent-xyz"
                      (org-mode-google-tasks-sync-org-stored-parent-id task))))))
 
+(ert-deftest org-mode-google-tasks-sync-org-test/replace-body-preserves-children ()
+  "`--replace-body' must not delete child headings.
+Org's `:contents-end' on a headline spans the whole subtree
+\(section + nested headings); without clamping the deletion end at
+the first child, a `write-task' on a parent task would silently
+nuke its subtasks.  Regression for the buffer-clobber bug class."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* TODO Parent
+SCHEDULED: <2026-08-05 Wed>
+:PROPERTIES:
+:GTASK_ID: parent-id
+:END:
+Old body line one.
+Old body line two.
+
+** TODO Subtask A
+   :PROPERTIES:
+   :GTASK_ID: sub-a
+   :END:
+** TODO Subtask B
+   :PROPERTIES:
+   :GTASK_ID: sub-b
+   :END:
+"
+    (re-search-forward "^\\*+ ")
+    (org-mode-google-tasks-sync-org--replace-body "Fresh body.")
+    (goto-char (point-min))
+    (should (re-search-forward "Fresh body" nil t))
+    (should (re-search-forward "Subtask A" nil t))
+    (should (re-search-forward "Subtask B" nil t))
+    ;; The old body lines are gone.
+    (goto-char (point-min))
+    (should-not (re-search-forward "Old body line one" nil t))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/replace-body-no-children-replaces-whole-section ()
+  "When the heading has no children, `--replace-body' replaces the whole body section."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* TODO Parent
+SCHEDULED: <2026-08-05 Wed>
+Old body.
+"
+    (re-search-forward "^\\*+ ")
+    (org-mode-google-tasks-sync-org--replace-body "New body.")
+    (goto-char (point-min))
+    (should (re-search-forward "New body" nil t))
+    (should-not (re-search-forward "Old body" nil t))))
+
 (provide 'org-mode-google-tasks-sync-org-test)
 ;;; org-mode-google-tasks-sync-org-test.el ends here

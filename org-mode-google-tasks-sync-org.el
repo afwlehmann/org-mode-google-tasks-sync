@@ -299,7 +299,13 @@ Preserves the leading stars, TODO keyword, and any priority cookie."
 
 (defun org-mode-google-tasks-sync-org--replace-body (new-body)
   "Replace the body of the current heading with NEW-BODY.
-Preserves the property drawer and planning lines."
+Preserves the property drawer, planning lines, and any child
+headings.  Org's `:contents-end' on a headline spans its entire
+subtree \(section plus nested headings); without clamping the
+deletion to the first child, a `write-task' on a parent task
+would silently nuke its subtasks.  Planning lines and the
+property drawer may appear in either order; this loops until
+neither prefix matches, matching `--canonicalize-body'."
   (save-excursion
     (org-back-to-heading t)
     (let* ((element (org-element-at-point))
@@ -307,12 +313,23 @@ Preserves the property drawer and planning lines."
            (contents-end (org-element-property :contents-end element)))
       (when (and contents-begin contents-end)
         (goto-char contents-begin)
-        (when (looking-at "[ \t]*:PROPERTIES:")
-          (re-search-forward "^[ \t]*:END:[ \t]*\n" contents-end t))
-        (while (looking-at "[ \t]*\\(SCHEDULED\\|DEADLINE\\|CLOSED\\):")
-          (forward-line 1))
-        (let ((body-start (point)))
-          (delete-region body-start contents-end)
+        (let (prev)
+          (while (not (equal (point) prev))
+            (setq prev (point))
+            (when (looking-at "[ \t]*:PROPERTIES:")
+              (re-search-forward "^[ \t]*:END:[ \t]*\n" contents-end t))
+            (while (looking-at "[ \t]*\\(SCHEDULED\\|DEADLINE\\|CLOSED\\):")
+              (forward-line 1))))
+        ;; Clamp the deletion end at the first child heading so we never
+        ;; cross into a subtask.  Org headings start with `^\\*+ `; a body
+        ;; without children leaves END-BOUND at CONTENTS-END.
+        (let* ((body-start (point))
+               (end-bound
+                (save-excursion
+                  (if (re-search-forward "^\\*+ " contents-end t)
+                      (line-beginning-position)
+                    contents-end))))
+          (delete-region body-start end-bound)
           (unless (string-empty-p new-body)
             (insert new-body)
             (unless (string-suffix-p "\n" new-body)
