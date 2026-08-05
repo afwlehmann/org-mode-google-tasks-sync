@@ -583,5 +583,55 @@ PREVIOUS."
     (should captured-url)
     (should-not (string-match-p "?" captured-url))))
 
+;;; -- write-task-if-marker-matches guard -------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/write-task-if-marker-matches-writes-when-title-matches ()
+  "When the marker still points at a heading with the same title, the write runs."
+  (let ((file (make-temp-file "gtasks-marker-match" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n** TODO Foo\n"))
+          (with-current-buffer (find-file-noselect file)
+            (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\* ")
+              (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L")))
+                (setf (org-mode-google-tasks-sync-org-task-id task) "new-id")
+                (should (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task)))
+              (should (equal "new-id" (org-entry-get nil "GTASK_ID")))))
+          (with-current-buffer (find-file-noselect file)
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/write-task-if-marker-matches-skips-when-title-mismatches ()
+  "When the marker points at a heading with a DIFFERENT title, the write is skipped.
+Regression for the buffer-clobber bug: a deferred async callback
+\(e.g. push-new's :then) whose marker got orphaned by a prior
+sort/sweep must NOT clobber the wrong heading."
+  (let ((file (make-temp-file "gtasks-marker-mismatch" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n** TODO Wrong heading\n"))
+          (with-current-buffer (find-file-noselect file)
+            (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\* ")
+              (let ((task (make-org-mode-google-tasks-sync-org-task
+                           :title "Foo"
+                           :id "new-id"
+                           :marker (point-marker))))
+                (should-not (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task)))
+              ;; The wrong heading must not have gained a GTASK_ID.
+              (should (null (org-entry-get nil "GTASK_ID")))))
+          (with-current-buffer (find-file-noselect file)
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

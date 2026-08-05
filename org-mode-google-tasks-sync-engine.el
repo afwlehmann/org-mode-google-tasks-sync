@@ -741,10 +741,10 @@ same way an un-retryable push would."
        (when local-differs
          (org-mode-google-tasks-sync-engine--quarantine
           "local-overwritten-after-412" task))
-       (org-mode-google-tasks-sync-org-write-task
-        (org-mode-google-tasks-sync-engine--remote-task->struct
-         fresh list-id
-         (org-mode-google-tasks-sync-org-task-marker task)))
+        (org-mode-google-tasks-sync-engine--write-task-if-marker-matches
+         (org-mode-google-tasks-sync-engine--remote-task->struct
+          fresh list-id
+          (org-mode-google-tasks-sync-org-task-marker task)))
        (org-mode-google-tasks-sync-engine--log
         "ETag conflict resolved (remote-wins): %s"
         (org-mode-google-tasks-sync-org-task-title task))
@@ -778,10 +778,7 @@ confirms the completion."
           (setf (org-mode-google-tasks-sync-org-task-updated task) updated)
           (setf (org-mode-google-tasks-sync-org-task-etag task) etag)
           (when (org-mode-google-tasks-sync-org-task-marker task)
-            (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
-              (save-excursion
-                (goto-char (org-mode-google-tasks-sync-org-task-marker task))
-                (org-mode-google-tasks-sync-org-write-task task)))))
+            (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task)))
         (org-mode-google-tasks-sync-engine--log "Pushed: %s"
                                            (org-mode-google-tasks-sync-org-task-title task))
         (when on-success (funcall on-success resp)))
@@ -793,6 +790,35 @@ confirms the completion."
       (lambda (err)
         (org-mode-google-tasks-sync-engine--finalize-push-etag-conflict
          on-failure token list-id task err on-success)))))
+
+(defun org-mode-google-tasks-sync-engine--write-task-if-marker-matches (task)
+  "Write TASK to its marker, but only if the marker still points at TASK's heading.
+Async callbacks (`--push-new', `--push-update', the 412 finalizer) fire
+after the engine has potentially mutated the buffer (sort, sweep,
+inserts); a stale marker can land on the wrong heading and clobber it.
+Verifies the heading at the marker has the same title as TASK before
+writing.  On mismatch: log a warning and skip the write — the next
+tick's reconciliation will fix the buffer naturally.  Returns non-nil
+when the write ran."
+  (let ((m (org-mode-google-tasks-sync-org-task-marker task))
+        (title (org-mode-google-tasks-sync-org-task-title task)))
+    (if (and m (marker-buffer m))
+        (with-current-buffer (marker-buffer m)
+          (save-excursion
+            (goto-char m)
+            (org-back-to-heading t)
+            (let ((actual (org-element-property
+                           :raw-value (org-element-at-point))))
+              (if (equal actual title)
+                  (progn
+                    (org-mode-google-tasks-sync-org-write-task task)
+                    t)
+                (org-mode-google-tasks-sync-engine--log
+                 "WARN: marker detached for %S; heading at marker is %S; skipping in-place write"
+                 title actual)
+                nil))))
+      (org-mode-google-tasks-sync-org-write-task task)
+      t)))
 
 (defun org-mode-google-tasks-sync-engine--push-new (token list-id task &optional file)
   "POST a new TASK to Google in LIST-ID using TOKEN.
@@ -808,11 +834,8 @@ query param to `tasks.insert' so Google knows the nesting."
        (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
        (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
        (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
-       (when (org-mode-google-tasks-sync-org-task-marker task)
-         (with-current-buffer (marker-buffer (org-mode-google-tasks-sync-org-task-marker task))
-           (save-excursion
-             (goto-char (org-mode-google-tasks-sync-org-task-marker task))
-             (org-mode-google-tasks-sync-org-write-task task))))
+        (when (org-mode-google-tasks-sync-org-task-marker task)
+          (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task))
        (org-mode-google-tasks-sync-engine--log "Pushed new: %s"
                                           (org-mode-google-tasks-sync-org-task-title task)))
      (lambda (err)
