@@ -771,14 +771,16 @@ engine's own write would re-trigger the sync chain on every save."
        (org-entry-get nil "GTASK_LIST" t)))
 
 (defun org-mode-google-tasks-sync--sibling-ids ()
-  "Return a list of (MARKER . GTASK_ID) for direct siblings of heading at point.
+  "Return (MARKER . GTASK_ID-or-nil) pairs for direct siblings at point.
 Includes the heading at point itself, in buffer order.  Siblings
-without :GTASK_ID: are skipped (they're local-only).  Uses
-`org-get-previous-sibling' / `org-get-next-sibling' so a sibling's
-child subtree is never mistaken for a sibling, and so the walk
-terminates cleanly (the `same-level' variants can loop forever when
-a heading has no siblings at its own level but shares the parent
-with a deeper subtree)."
+without :GTASK_ID: are kept with a nil cdr — they occupy a slot
+in the buffer order that matters for computing the `previous'
+query param of `tasks.move' (Google only knows about synced
+tasks, so the nearest synced predecessor determines `previous';
+the unsynced ones are skipped when picking the id but preserved
+for index arithmetic).  Uses `org-get-previous-sibling' /
+`org-get-next-sibling' so a sibling's child subtree is never
+mistaken for a sibling."
   (save-excursion
     (org-back-to-heading t)
     (let* ((here-marker (point-marker))
@@ -796,10 +798,9 @@ with a deeper subtree)."
           (push (cons (point-marker)
                       (org-entry-get nil "GTASK_ID"))
                 after)))
-      (cl-remove-if (lambda (cell) (null (cdr cell)))
-                    (nconc before
-                           (cons (cons here-marker here-id)
-                                 (nreverse after)))))))
+      (nconc before
+             (cons (cons here-marker here-id)
+                   (nreverse after))))))
 
 (defun org-mode-google-tasks-sync--prev-sibling-id (sibs current-marker)
   "Return the :GTASK_ID: of the sibling immediately before CURRENT-MARKER.
@@ -897,9 +898,15 @@ appended as its last child.  Refuses if the heading has subtasks
           (cons new-parent-id last-child-id))))))
 
 (defun org-mode-google-tasks-sync--update-heading-server-state
-    (updated etag position)
-  "Write UPDATED/ETAG/POSITION onto the heading at point."
+    (updated etag position &optional heading-marker)
+  "Write UPDATED/ETAG/POSITION onto the heading at HEADING-MARKER.
+When HEADING-MARKER is nil, writes at point (legacy callers).  Goes
+through the marker so an async callback (e.g. `--apply-server-move's
+:then) doesn't accidentally stamp the props onto whatever heading
+point happens to be on when the callback fires."
   (save-excursion
+    (when heading-marker
+      (goto-char heading-marker))
     (org-back-to-heading t)
     (when (and updated (fboundp 'org-entry-put))
       (org-entry-put nil "GTASK_UPDATED" updated))
@@ -908,26 +915,47 @@ appended as its last child.  Refuses if the heading has subtasks
     (when (and position (fboundp 'org-entry-put))
       (org-entry-put nil "GTASK_POSITION" position))))
 
+(defun org-mode-google-tasks-sync--refresh-content-hash-at (heading-marker)
+  "Recompute and write :GTASK_CONTENT_HASH: at HEADING-MARKER.
+After a server-first move the heading's content didn't change but
+its server-side metadata did; the next tick's `--decide' compares
+the canonical hash against the stored one, so we keep them in sync
+to avoid a phantom `pull' that would reorder the heading back to
+its pre-move position."
+  (when (and heading-marker (marker-buffer heading-marker))
+    (with-current-buffer (marker-buffer heading-marker)
+      (save-excursion
+        (goto-char heading-marker)
+        (org-back-to-heading t)
+        (let* ((list-id (org-entry-get nil "GTASK_LIST" t))
+               (task (org-mode-google-tasks-sync-org-read-task-at-point list-id)))
+           (org-entry-put nil "GTASK_CONTENT_HASH"
+                          (org-mode-google-tasks-sync-org-canonical-hash task)))))))
+
 (defun org-mode-google-tasks-sync--apply-server-move
     (token list-id task-id new-parent-id previous-id title
-     &optional post-move-fn)
+     &optional post-move-fn heading-marker)
   "Call `tasks.move' and log; on success call POST-MOVE-FN with the response.
 TOKEN authenticates the call.  LIST-ID is the Google Tasks list.
 TASK-ID identifies the task.  NEW-PARENT-ID and PREVIOUS-ID are the
-move params (either may be nil).  TITLE is for logging."
+move params (either may be nil).  TITLE is for logging.
+HEADING-MARKER, when given, pins the server-state write to the moved
+heading; without it the async callback would write GTASK_POSITION
+onto whatever heading point happens to be on, and the next tick's
+sort would reset the moved task to its old position."
   (org-mode-google-tasks-sync-api-move-task
    token list-id task-id
-     (lambda (resp)
-       (let ((updated (alist-get 'updated resp))
-             (etag (alist-get 'etag resp))
-             (position (alist-get 'position resp)))
-         ;; Update the heading's server-state properties.
-         (org-mode-google-tasks-sync--update-heading-server-state
-          updated etag position)
-         (when post-move-fn (funcall post-move-fn resp))
-       (org-mode-google-tasks-sync-engine--log
-        "Moved (local push): %s" title)
-       (message "Moved %S" title)))
+   (lambda (resp)
+     (let ((updated (alist-get 'updated resp))
+           (etag (alist-get 'etag resp))
+           (position (alist-get 'position resp)))
+       (org-mode-google-tasks-sync--update-heading-server-state
+        updated etag position heading-marker)
+       (org-mode-google-tasks-sync--refresh-content-hash-at heading-marker)
+       (when post-move-fn (funcall post-move-fn resp)))
+     (org-mode-google-tasks-sync-engine--log
+      "Moved (local push): %s" title)
+     (message "Moved %S" title))
    (lambda (err)
      (org-mode-google-tasks-sync-engine--log
       "Move error: %S (task=%s)" err title)
@@ -948,7 +976,7 @@ can't undo the local reorder."
                        :raw-value (org-element-at-point)) ""))
            (params (org-mode-google-tasks-sync--compute-move-params direction))
            (token (org-mode-google-tasks-sync-engine--token))
-           (marker (point-marker)))
+           (marker (org-mode-google-tasks-sync-org--sticky-marker)))
       (when params
         (message "Moving…")
         (org-mode-google-tasks-sync--apply-server-move
@@ -960,7 +988,8 @@ can't undo the local reorder."
                (goto-char marker)
                (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
                  (funcall orig-fn)
-                 (save-buffer))))))))))
+                 (save-buffer)))))
+         marker)))))
 
 (defun org-mode-google-tasks-sync--advised-promote (orig-fn)
   "Advice wrapper for `org-do-promote'.
@@ -978,7 +1007,7 @@ top-level: parent=nil, previous=former parent."
                (title (or (org-element-property
                            :raw-value (org-element-at-point)) ""))
                (token (org-mode-google-tasks-sync-engine--token))
-               (marker (point-marker)))
+               (marker (org-mode-google-tasks-sync-org--sticky-marker)))
           (message "Promoting…")
           (org-mode-google-tasks-sync--apply-server-move
            token list-id task-id
@@ -989,7 +1018,8 @@ top-level: parent=nil, previous=former parent."
                  (goto-char marker)
                  (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
                    (funcall orig-fn)
-                   (save-buffer)))))))))))
+                   (save-buffer)))))
+           marker))))))
 
 (defun org-mode-google-tasks-sync--advised-demote (orig-fn)
   "Advice wrapper for `org-do-demote'.
@@ -1004,7 +1034,7 @@ of that sibling."
                        :raw-value (org-element-at-point)) ""))
            (params (org-mode-google-tasks-sync--compute-demote-params))
            (token (org-mode-google-tasks-sync-engine--token))
-           (marker (point-marker)))
+           (marker (org-mode-google-tasks-sync-org--sticky-marker)))
       (when params
         (message "Demoting…")
         (org-mode-google-tasks-sync--apply-server-move
@@ -1016,7 +1046,8 @@ of that sibling."
                (goto-char marker)
                (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
                  (funcall orig-fn)
-                 (save-buffer))))))))))
+                 (save-buffer)))))
+         marker)))))
 
 (defun org-mode-google-tasks-sync--refuse-subtree-op (orig-fn)
   "Advice wrapper that refuses subtree-wide promote/demote on synced headings.

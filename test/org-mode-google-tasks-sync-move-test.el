@@ -110,8 +110,12 @@ heading start could never match the heading itself, making every
     (should (equal '("a" "b" "c")
                    (mapcar #'cdr (org-mode-google-tasks-sync--sibling-ids))))))
 
-(ert-deftest move-test/sibling-ids-skips-local-only-siblings ()
-  "Siblings without :GTASK_ID: are skipped (they're local-only)."
+(ert-deftest move-test/sibling-ids-keeps-local-only-siblings ()
+  "Siblings without :GTASK_ID: are kept with a nil cdr.
+They occupy a slot in buffer order that matters for computing
+the `previous' query param of `tasks.move' (Google only knows
+about synced tasks, so the nearest synced predecessor determines
+`previous'; the unsynced ones are preserved for index arithmetic)."
   (org-mode-google-tasks-sync-move-test--with-org
       "* Tasks
 ** TODO Synced
@@ -125,7 +129,7 @@ heading start could never match the heading itself, making every
    :END:
 "
     (org-mode-google-tasks-sync-move-test--goto-title "Synced")
-    (should (equal '("s" "t")
+    (should (equal '("s" nil "t")
                    (mapcar #'cdr (org-mode-google-tasks-sync--sibling-ids))))))
 
 (ert-deftest move-test/sibling-ids-ignores-nephews ()
@@ -461,6 +465,57 @@ meaning B becomes first."
       (should params)
       (should (equal "b" (car params)))
       (should (equal "d" (cdr params))))))
+
+;;; -- --apply-server-move pins writes to the moved heading --------------------
+
+(ert-deftest move-test/apply-server-move-writes-position-at-marker-not-point ()
+  "`--apply-server-move' writes GTASK_POSITION at HEADING-MARKER, not at point.
+The async callback fires with point wherever the user left it; without
+pinning the write to the moved heading's marker, GTASK_POSITION would
+land on the wrong heading and the next tick's sort would reset the
+moved task to its old position."
+  (org-mode-google-tasks-sync-move-test--with-org
+      "* Tasks
+** TODO A
+   :PROPERTIES:
+   :GTASK_ID: a
+   :GTASK_LIST: L
+   :GTASK_POSITION: 00000000000000000000
+   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z
+   :GTASK_CONTENT_HASH: old
+   :END:
+** TODO B
+   :PROPERTIES:
+   :GTASK_ID: b
+   :GTASK_LIST: L
+   :GTASK_POSITION: 00000000000000000001
+   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z
+   :GTASK_CONTENT_HASH: old
+   :END:
+"
+    (require 'org-mode-google-tasks-sync-engine)
+    (org-mode-google-tasks-sync-move-test--goto-title "B")
+    (let ((b-marker (org-mode-google-tasks-sync-org--sticky-marker)))
+      ;; Point is on B; capture B's marker, then move point to A.
+      (org-mode-google-tasks-sync-move-test--goto-title "A")
+      (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                 (lambda (_token _list-id _task-id then _else _parent _prev)
+                   (funcall then '((updated . "2026-08-05T10:00:00.000Z")
+                                   (etag . "new-etag")
+                                   (position . "00000000000000000005"))))))
+        (org-mode-google-tasks-sync--apply-server-move
+         nil "L" "b" nil nil "B" #'ignore b-marker))
+      ;; B should have the new position + etag + hash; A should be untouched.
+      (org-mode-google-tasks-sync-move-test--goto-title "B")
+      (should (equal "00000000000000000005" (org-entry-get nil "GTASK_POSITION")))
+      (should (equal "new-etag" (org-entry-get nil "GTASK_ETAG")))
+      (should (equal "2026-08-05T10:00:00.000Z" (org-entry-get nil "GTASK_UPDATED")))
+      ;; Content hash should be refreshed (not "old").
+      (should-not (equal "old" (org-entry-get nil "GTASK_CONTENT_HASH")))
+      ;; A is untouched.
+      (org-mode-google-tasks-sync-move-test--goto-title "A")
+      (should (equal "00000000000000000000" (org-entry-get nil "GTASK_POSITION")))
+      (should (equal "old" (org-entry-get nil "GTASK_CONTENT_HASH"))))))
 
 (provide 'org-mode-google-tasks-sync-move-test)
 ;;; org-mode-google-tasks-sync-move-test.el ends here
