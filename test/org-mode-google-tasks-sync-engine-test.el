@@ -633,5 +633,72 @@ sort/sweep must NOT clobber the wrong heading."
             (kill-buffer)))
       (delete-file file))))
 
+;;; -- push-new passes previous param for position preservation ---------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/push-new-passes-previous-when-has-preceding-sibling ()
+  "`--push-new' passes `previous' = the preceding synced sibling's :GTASK_ID:
+so Google appends the task at the same position the user placed it locally.
+Without `previous', Google inserts at the top of the list and the next
+tick's sort pulls the task away from its intended place."
+  (let ((file (make-temp-file "gtasks-push-prev" nil ".org"))
+        captured-query-args)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: a-id\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Foo\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-insert-task)
+                     (lambda (_token _list-id _data then _else query-args)
+                       (setq captured-query-args query-args)
+                       (funcall then '((id . "new") (updated . "u") (etag . "e"))))))
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "^\\*\\* TODO Foo")
+                (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L")))
+                  (org-mode-google-tasks-sync-engine--push-new
+                   nil "L" task file))))))
+      (should (assoc "previous" captured-query-args))
+      (should (equal "a-id" (cdr (assoc "previous" captured-query-args))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/push-new-omits-previous-when-first-sibling ()
+  "`--push-new' omits `previous' when the task is the first sibling
+\(no preceding synced heading)."
+  (let ((file (make-temp-file "gtasks-push-no-prev" nil ".org"))
+        captured-query-args)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n** TODO Foo\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-insert-task)
+                     (lambda (_token _list-id _data then _else query-args)
+                       (setq captured-query-args query-args)
+                       (funcall then '((id . "new") (updated . "u") (etag . "e"))))))
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "^\\*\\* ")
+                (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L")))
+                  (org-mode-google-tasks-sync-engine--push-new
+                   nil "L" task file))))))
+      (should-not (assoc "previous" captured-query-args))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

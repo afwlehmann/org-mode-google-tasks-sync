@@ -823,10 +823,19 @@ when the write ran."
 (defun org-mode-google-tasks-sync-engine--push-new (token list-id task &optional file)
   "POST a new TASK to Google in LIST-ID using TOKEN.
 When FILE is given and TASK has a `parent-id', pass it as the `parent'
-query param to `tasks.insert' so Google knows the nesting."
+query param to `tasks.insert' so Google knows the nesting.  Also
+passes `previous' (the :GTASK_ID: of the nearest preceding synced
+sibling) so Google appends the task after it — matching the local
+buffer order.  Without `previous', Google inserts new tasks at the
+top of the list, and the next tick's `--sort-children' would pull
+the task away from where the user placed it."
   (let* ((parent-id (org-mode-google-tasks-sync-org-task-parent-id task))
-         (insert-args (when (and file parent-id)
-                        `(("parent" . ,parent-id)))))
+         (previous-id (when file
+                        (org-mode-google-tasks-sync-engine--prev-synced-sibling-id task)))
+         (insert-args
+          (delq nil
+                (append (when parent-id `(("parent" . ,parent-id)))
+                        (when previous-id `(("previous" . ,previous-id)))))))
     (org-mode-google-tasks-sync-api-insert-task
      token list-id
      (org-mode-google-tasks-sync-engine--task->api-data task)
@@ -843,6 +852,17 @@ query param to `tasks.insert' so Google knows the nesting."
                                          err
                                          (org-mode-google-tasks-sync-org-task-title task)))
      insert-args)))
+
+(defun org-mode-google-tasks-sync-engine--prev-synced-sibling-id (task)
+  "Return the :GTASK_ID: of the nearest preceding synced sibling of TASK.
+Nil when TASK is the first sibling (or when its marker is invalid).
+Used by `--push-new' to pass `previous' to `tasks.insert' so Google
+appends the task at the same position the user placed it locally."
+  (let ((m (org-mode-google-tasks-sync-org-task-marker task)))
+    (when (and m (marker-buffer m))
+      (with-current-buffer (marker-buffer m)
+        (save-excursion
+          (org-mode-google-tasks-sync-org--prev-sibling-id-at-point))))))
 
 (defun org-mode-google-tasks-sync-engine--delete-local (task &optional source-file reason)
   "Remove TASK's heading from the buffer.
