@@ -334,12 +334,17 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
                    (when since `(("updatedMin" . ,since)))))))
     (org-mode-google-tasks-sync-api-list-tasks
      token list-id args
-     (lambda (remote-tasks)
-       (org-mode-google-tasks-sync-engine--apply
-        token list-id file parent mode remote-tasks done))
-     (lambda (err)
-       (org-mode-google-tasks-sync-engine--log "Fetch error for list %s: %S" list-id err)
-       (funcall done)))))
+      (lambda (remote-tasks)
+        (condition-case err
+            (org-mode-google-tasks-sync-engine--apply
+             token list-id file parent mode remote-tasks done)
+          (error
+           (org-mode-google-tasks-sync-engine--log
+            "Apply failed for list %s: %S" list-id err)
+           (funcall done))))
+      (lambda (err)
+        (org-mode-google-tasks-sync-engine--log "Fetch error for list %s: %S" list-id err)
+        (funcall done)))))
 
 (defun org-mode-google-tasks-sync-engine--last-sync (file)
   "Read the #+GTASKS_LAST_SYNC keyword from FILE, or nil."
@@ -444,27 +449,53 @@ nil or points at no heading."
         (when (org-at-heading-p)
           (org-mode-google-tasks-sync-engine--sort-subtree-at-point))))))
 
+(defun org-mode-google-tasks-sync-engine--back-to-heading-safe ()
+  "Move point to the nearest heading, never raising a user-error.
+`org-back-to-heading' raises `user-error' when point is before the
+first headline (e.g. at `point-min' after `org-sort-entries' on a
+buffer that begins with #+ keyword lines); that error aborts the
+sync and leaves the state machine stuck at `applying'.  This
+wrapper falls back to a forward search in that case.  Returns
+non-nil when point ended on a heading, nil otherwise."
+  (cond
+   ((org-at-heading-p) t)
+   ((org-before-first-heading-p)
+    (when (re-search-forward "^\\*+ " nil t)
+      (beginning-of-line)
+      t))
+   (t
+    (condition-case nil
+        (progn (org-back-to-heading t) t)
+      (error nil)))))
+
 (defun org-mode-google-tasks-sync-engine--sort-subtree-at-point ()
   "Sort the children of the heading at point, then recurse into each child.
 Children are sorted by `--task-sort-key' / `--compare-tasks'."
   (condition-case err
-      (org-sort-entries nil ?f
-                        #'org-mode-google-tasks-sync-engine--task-sort-key
-                        #'org-mode-google-tasks-sync-engine--compare-tasks)
+      (progn
+        (org-sort-entries nil ?f
+                          #'org-mode-google-tasks-sync-engine--task-sort-key
+                          #'org-mode-google-tasks-sync-engine--compare-tasks)
+        ;; Recurse into each direct child.  `org-sort-entries' can leave
+        ;; point at `point-min' (e.g. when the buffer begins with #+
+        ;; keyword lines); `org-back-to-heading' would raise a user-error
+        ;; from there, aborting the sync and leaving the state machine
+        ;; stuck at `applying'.  Relocate via `--back-to-heading-safe'
+        ;; and bail out cleanly if no heading is found.
+        (save-excursion
+          (when (org-mode-google-tasks-sync-engine--back-to-heading-safe)
+            (when (org-at-heading-p)
+              (let ((parent-level (org-current-level)))
+                (forward-line 1)
+                (while (and (not (eobp))
+                            (looking-at "^\\*+ ")
+                            (= (org-current-level) (1+ parent-level)))
+                  (org-mode-google-tasks-sync-engine--sort-subtree-at-point)
+                  (when (org-mode-google-tasks-sync-engine--back-to-heading-safe)
+                    (forward-line 1))))))))
     (error
      (org-mode-google-tasks-sync-engine--log
-      "Sort skipped: %S" err)))
-  ;; Recurse into each direct child.
-  (save-excursion
-    (org-back-to-heading t)
-    (let ((parent-level (org-current-level)))
-      (forward-line 1)
-      (while (and (not (eobp))
-                  (looking-at "^\\*+ ")
-                  (= (org-current-level) (1+ parent-level)))
-        (org-mode-google-tasks-sync-engine--sort-subtree-at-point)
-        (org-back-to-heading t)
-        (forward-line 1)))))
+      "Sort skipped: %S" err))))
 
 (defun org-mode-google-tasks-sync-engine--parent-marker (file parent)
   "Return marker of PARENT heading in FILE, creating the heading if absent.

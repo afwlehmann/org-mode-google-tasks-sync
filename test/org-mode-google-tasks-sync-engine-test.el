@@ -700,5 +700,99 @@ tick's sort pulls the task away from its intended place."
         (kill-buffer))
       (delete-file file))))
 
+;;; -- sort resilience: #+ keywords before first heading ---------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/sort-children-does-not-error-with-keywords-before-first-heading ()
+  "`--sort-children' must not raise when the buffer begins with #+
+keyword lines (e.g. #+TITLE:, #+GTASKS_LAST_SYNC:).  Regression for
+the bug where `org-sort-entries' left point at `point-min' (inside
+the keyword lines, before the first `*' heading) and the subsequent
+`org-back-to-heading t' raised `user-error \"Before first headline
+at position 1\"', aborting the sync and leaving the state machine
+stuck at `applying'."
+  (let ((file (make-temp-file "gtasks-sort-keywords" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TITLE: Tasks\n"
+                    "#+GTASKS_LAST_SYNC: 2026-01-01T00:00:00.000Z\n\n"
+                    "* Tasks\n"
+                    "** TODO B\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: b\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000002\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: a\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          ;; Drive through --apply with mode='full and mocked push fns
+          ;; so the sort-children step runs against a buffer whose
+          ;; children are in reverse position order.
+          (let* ((remote `(((id . "a")
+                            (title . "A")
+                            (status . "needsAction")
+                            (updated . "2026-01-01T00:00:00.000Z")
+                            (position . "00000000000000000001"))
+                           ((id . "b")
+                            (title . "B")
+                            (status . "needsAction")
+                            (updated . "2026-01-01T00:00:00.000Z")
+                            (position . "00000000000000000002")))))
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                       (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
+                       (lambda (&rest _) t)))
+              ;; Must not raise.
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'full
+               remote
+               #'ignore)))
+          (with-current-buffer (find-file-noselect file)
+            (widen)
+            (goto-char (point-min))
+            ;; Children are now sorted by position ascending: A before B.
+            (should (re-search-forward "^\\*\\* TODO A" nil t))
+            (should (re-search-forward "^\\*\\* TODO B" nil t))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/sync-one-calls-done-when-apply-throws ()
+  "`--sync-one' must call DONE even when `--apply' throws, so the
+state machine is never left waiting on a sync that already failed.
+Defense in depth against any future bug in `--apply' locking out
+the sync — `--sync-next' relies on DONE being called to advance to
+the next entry or return to `idle'."
+  (let ((file (make-temp-file "gtasks-apply-throw" nil ".org"))
+        (done-called nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TITLE: Tasks\n\n* Tasks\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-list-tasks)
+                     (lambda (_token _list-id _args then _else)
+                       (funcall then '())))
+                    ((symbol-function 'org-mode-google-tasks-sync-engine--apply)
+                     (lambda (&rest _)
+                       (signal 'user-error "simulated apply failure"))))
+            (org-mode-google-tasks-sync-engine--sync-one
+             nil "L" file "Tasks" 'full
+             (lambda () (setq done-called t))))
+          (should done-called)
+          (with-current-buffer (find-file-noselect file)
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file))))
+
 (provide 'org-mode-google-tasks-sync-engine-test)
 ;;; org-mode-google-tasks-sync-engine-test.el ends here
