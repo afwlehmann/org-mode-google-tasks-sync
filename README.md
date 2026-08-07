@@ -31,11 +31,12 @@ This package syncs **Google Tasks only** — not Google Calendar events.
 | Subtask nesting (two levels) | ✅ ↔ Google `parent` — top-level tasks and one level of subtasks. Reparenting conflicts resolved remote-wins. |
 | `[#A]` / `[#B]` / `[#C]` priority cookies | ❌ Local-only — stripped from title on push, preserved on pull |
 | Org tags (`:tag1:` `:tag2:`) | ✅ Encoded as trailing `@` hashtags in the pushed title (e.g. `Buy milk @errands @work`), decoded back into org tags on pull. Sorted; whitespace-containing tags are silently dropped. |
-| Tag ordering / `position` | ✅ Via org's own `M-↑`/`M-↓`/`M-←`/`M-→` keys (server-first, no race) |
+| Tag ordering / `position` | ✅ Via org's `M-↑`/`M-↓`/`M-←`/`M-→` keys (server-first, no race), or manual cut/paste (detected at next tick) |
 | Links / attachments (`links[]`, `webViewLink`) | 📖 Read-only display — populated by Gmail/Keep/Chat/Docs; stored as `:GTASK_LINKS:` / `:GTASK_WEB_LINK:` properties.  Not pushable via the API. |
 | Starred | ❌ No `starred` field in the Tasks API v1 |
 | Recurring tasks | ❌ Google Tasks API is read-only for recurrence |
 | `DEADLINE:` | ❌ Only `SCHEDULED:` maps to Google's `due` |
+| Hidden tasks (`hidden=true`) | 🗑️ Treated as deleted — removed locally with trash snapshot. See [Hidden tasks](#hidden-tasks). |
 
 ### Sync scope
 
@@ -320,6 +321,8 @@ All advised operations are **server-first**: the heading doesn't move locally un
 
 Non-synced headings pass through to org's original behavior with zero change.
 
+**Manual cut/paste reorders**: if you cut a heading and paste it elsewhere (instead of using `M-↑`/`M-↓`/`M-←`/`M-→`), the engine detects the reorder at the next tick by comparing the buffer's physical sibling order against the order implied by stored `:GTASK_POSITION:` values.  It then fires `tasks.move` for every synced sibling to push your intended order to the server.  This runs *before* the sort step, so the buffer converges to your manual reorder.
+
 **Demote guard:** demoting a top-level task that itself has subtask headings is refused — the subtasks would fall to level N+3 (outside the 2-level sync window) and stop syncing.  Move or delete the subtasks first.
 
 ### Hide DONE tasks
@@ -386,6 +389,17 @@ To restore the historical two-way DONE sync behavior (completed tasks stay in th
 
 This is a **breaking change**: users upgrading from a version that always kept DONE headings will, after upgrading, see completed tasks start disappearing from the org buffer.  Set the defcustom to `t` to restore the prior behavior.
 
+### Hidden tasks
+
+Google Tasks' web UI has a **"Clear completed tasks"** action that marks completed tasks as `hidden=true` on the server.  These tasks are not deleted — they remain on the server but are invisible in the web UI.  This package treats `hidden=true` tasks as **deleted**:
+
+- Hidden tasks are filtered out of the remote set *before* reconciliation — they are never pulled or pushed.
+- Any local heading whose `:GTASK_ID:` matches a hidden task is removed via `--delete-local` with reason `hidden-archived` (trash-snapshotted).
+- This runs in both `incremental` and `full` sync modes.
+- **Restoring** a `hidden-archived` task creates a **fresh** task (new `:GTASK_ID:`), because the original is unreachable via the API.
+
+This is independent of `org-mode-google-tasks-sync-keep-done-items`: `hidden` is server-side archival; `keep-done-items` is a local display preference.
+
 ---
 
 ## Troubleshooting
@@ -438,7 +452,7 @@ See `AGENTS.md` for module layout, internal invariants, and conventions.
 - Google Tasks only (no Calendar events).
 - Single top-level subtree per list — synced headings must be direct children of the configured `PARENT-HEADING`.
 - Subtask nesting limited to one level (Google's data model only supports one).
-- Tasks reordered in one side don't reorder the other automatically — use org's `M-↑`/`M-↓`/`M-←`/`M-→` keys to push reorders to Google (see [Reorder and reparent](#reorder-and-reparent-with-orgs-own-keys)).
+- Reordering via org's `M-↑`/`M-↓`/`M-←`/`M-→` keys pushes to Google immediately (server-first).  Manual cut/paste reorders are detected at the next tick.
 - `due` is date-only; times of day are dropped on round-trip.
 - Recurring tasks: Google Tasks API is read-only for recurrence; not supported here.
 - Sync only runs while Emacs is open.
