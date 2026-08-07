@@ -18,6 +18,8 @@
 (require 'org-mode-google-tasks-sync-org)
 (require 'org-mode-google-tasks-sync-oauth)
 
+(declare-function org-save-outline-visibility "org-macs" (use-markers &rest body))
+
 (defvar org-mode-google-tasks-sync-map nil
   "Alist mapping Google Tasks list IDs to org file + parent heading.
 Defined in `org-mode-google-tasks-sync.el'; declared here so the
@@ -377,7 +379,9 @@ then tie repair, then sort — so the sort converges to the user's
 intended order.  The sort/save/stamp tail runs inside
 `with-current-buffer' on FILE so it targets the org buffer even
 when the caller is a plz `:then' callback whose `current-buffer'
-is the curl process buffer."
+is the curl process buffer.  The sort+save is wrapped in
+`org-save-outline-visibility' so the user's fold state survives
+`org-sort-entries' and other org operations in the write path."
   (org-mode-google-tasks-sync-engine--resolve-reorder-drift
    token list-id drift-pairs file
    (lambda ()
@@ -385,11 +389,12 @@ is the curl process buffer."
       token list-id parent-marker file
       (lambda ()
         (with-current-buffer (find-file-noselect file)
-          (org-mode-google-tasks-sync-engine--sort-children parent-marker)
-          (org-mode-google-tasks-sync-engine--set-last-sync
-           file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
-          (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
-            (save-buffer))
+          (org-save-outline-visibility nil
+            (org-mode-google-tasks-sync-engine--sort-children parent-marker)
+            (org-mode-google-tasks-sync-engine--set-last-sync
+             file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (save-buffer)))
           (funcall done)))))))
 
 (defun org-mode-google-tasks-sync-engine--apply
