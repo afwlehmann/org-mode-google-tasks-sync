@@ -430,6 +430,17 @@ appears to misbehave. With `org-mode-google-tasks-sync-log-level` at
 `'debug`, JSON serialization details and extra API diagnostics are
 included.
 
+### Duplicate subtasks after upgrade
+
+Versions before 0.5.5 had a bug where a parent task's `notes` slot
+included its children's heading text, causing the canonical hash to
+change whenever a subtask changed and the push callback to re-insert
+the child text as new headings — doubling subtasks on every sync.
+Upgrading to 0.5.5 fixes the root cause and the next sync
+deduplicates any existing copies automatically (duplicates at any
+level — top-level tasks and subtasks — are removed and snapshotted to
+the trash buffer for manual recovery if needed).
+
 ---
 
 ## Development
