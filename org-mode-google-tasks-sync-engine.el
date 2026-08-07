@@ -378,7 +378,17 @@ remote response is deleted via `--delete-local', which snapshots it
 to the trash buffer (recoverable via
 `org-mode-google-tasks-sync-restore-at-point') before removing the
 heading.  FILE is threaded through to `--reconcile-one' and the
-sweep so both deletion paths can snapshot."
+sweep so both deletion paths can snapshot.
+
+Tasks with `hidden=true' (cleared server-side via the Google Tasks
+UI's \"Clear completed tasks\") are filtered out of the live remote
+set before reconciliation — they are never pulled, pushed, or
+sorted.  Any local heading whose GTASK_ID matches a hidden task is
+removed via `--delete-local' with reason `hidden-archived'
+\(snapshotted to trash; restoring creates a fresh task because the
+original is unreachable on the server).  This runs in both
+`incremental' and `full' modes — unlike the full-sync sweep, which
+only fires in `full' mode."
   (setq org-mode-google-tasks-sync-engine--state 'applying)
   (with-current-buffer (find-file-noselect file)
     (let* ((local (org-mode-google-tasks-sync-org-collect-tasks-under file parent list-id))
@@ -386,13 +396,31 @@ sweep so both deletion paths can snapshot."
            (remote-by-id (make-hash-table :test 'equal))
            (parent-marker (org-mode-google-tasks-sync-engine--parent-marker file parent))
            (remote-list (append remote-tasks nil))
-           (top-level (cl-remove-if (lambda (r) (alist-get 'parent r)) remote-list))
-           (subtasks (cl-remove-if-not (lambda (r) (alist-get 'parent r)) remote-list)))
+           (visible (cl-remove-if (lambda (r) (eq (alist-get 'hidden r) t)) remote-list))
+           (hidden-ids (delq nil
+                             (mapcar (lambda (r) (when (eq (alist-get 'hidden r) t)
+                                                   (alist-get 'id r)))
+                                     remote-list)))
+           (top-level (cl-remove-if (lambda (r) (alist-get 'parent r)) visible))
+           (subtasks (cl-remove-if-not (lambda (r) (alist-get 'parent r)) visible)))
       (dolist (l local)
         (when (org-mode-google-tasks-sync-org-task-id l)
           (puthash (org-mode-google-tasks-sync-org-task-id l) l local-by-id)))
-      (dolist (r remote-list)
+      (dolist (r visible)
         (puthash (alist-get 'id r) r remote-by-id))
+      ;; Hidden-task removal: runs in both incremental and full modes.
+      ;; A local heading whose server-side twin has been cleared
+      ;; (hidden=true) is removed locally with a trash snapshot so
+      ;; `restore-at-point' can recreate it as a fresh task.
+      (when hidden-ids
+        (dolist (id hidden-ids)
+          (let ((local-task (gethash id local-by-id)))
+            (when local-task
+              (org-mode-google-tasks-sync-engine--delete-local
+               local-task file 'hidden-archived)
+              (org-mode-google-tasks-sync-engine--log
+               "Removed local (hidden server-side): %s"
+               (org-mode-google-tasks-sync-org-task-title local-task))))))
       ;; Pass 1: top-level tasks (no parent).
       (dolist (r top-level)
         (org-mode-google-tasks-sync-engine--reconcile-one

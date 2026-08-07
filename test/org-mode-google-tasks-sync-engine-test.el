@@ -515,6 +515,97 @@ engine deletions are recoverable, but the code never snapshotted."
 
 ;;; -- showCompleted pinned in list-tasks query -------------------------------
 
+;;; -- hidden tasks are filtered and removed locally --------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/hidden-task-removed-locally ()
+  "A remote task with `hidden=true' is filtered from the live remote
+set and any matching local heading is removed via `--delete-local'
+with reason `hidden-archived'.  Runs in incremental mode too (not
+gated on `full' like the absent-id sweep)."
+  (let ((file (make-temp-file "gtasks-hidden-remove" nil ".org")))
+    (unwind-protect
+        (progn
+          (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+            (kill-buffer "*org-mode-google-tasks-sync-trash*"))
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Visible\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: vis\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Cleared\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: clr\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (let ((remote `(((id . "vis")
+                           (title . "Visible")
+                           (status . "needsAction")
+                           (updated . "2026-01-01T00:00:00.000Z"))
+                          ((id . "clr")
+                           (title . "Cleared")
+                           (status . "completed")
+                           (hidden . t)
+                           (updated . "2026-01-01T00:00:00.000Z")))))
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                       (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
+                       (lambda (&rest _) t)))
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'incremental remote #'ignore))))
+      (with-current-buffer (find-file-noselect file)
+        (widen)
+        (goto-char (point-min))
+        (should (re-search-forward "Visible" nil t))
+        (should-not (re-search-forward "Cleared" nil t))
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      ;; Trash snapshot carries the hidden-archived reason.
+      (with-current-buffer (get-buffer-create
+                            "*org-mode-google-tasks-sync-trash*")
+        (goto-char (point-min))
+        (should (re-search-forward "Cleared" nil t))
+        (should (re-search-forward "hidden-archived" nil t)))
+      (delete-file file)
+      (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+        (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/hidden-task-not-pulled-into-buffer ()
+  "A remote task with `hidden=true' that has NO local heading is not
+inserted — the hidden filter drops it before the pull pass."
+  (let ((file (make-temp-file "gtasks-hidden-nopull" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"))
+          (let ((remote `(((id . "clr")
+                           (title . "Cleared")
+                           (status . "completed")
+                           (hidden . t)
+                           (updated . "2026-01-01T00:00:00.000Z")))))
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                       (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
+                       (lambda (&rest _) t)))
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'incremental remote #'ignore))))
+      (with-current-buffer (find-file-noselect file)
+        (widen)
+        (goto-char (point-min))
+        (should-not (re-search-forward "Cleared" nil t))
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+;;; -- showCompleted pinned in list-tasks query (cont.) -----------------------
+
 (ert-deftest org-mode-google-tasks-sync-engine-test/list-tasks-pins-showCompleted ()
   "The list-tasks API call must pin showCompleted=true.
 Without it, Google may omit completed tasks from a complete response,
