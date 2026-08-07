@@ -521,6 +521,113 @@ engine deletions are recoverable, but the code never snapshotted."
       (when (get-buffer "*org-mode-google-tasks-sync-trash*")
         (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
 
+;;; -- duplicate GTASK_ID dedup -------------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/dedup-duplicate-ids-at-any-level ()
+  "`--apply' removes duplicate local headings that share the same
+GTASK_ID, at any level (top-level tasks and subtasks alike).  Runs
+in both `incremental' and `full' modes — mirrors the hidden-task
+removal precedent (data-integrity fixes run regardless of mode).
+The last heading per ID wins; earlier shadows are deleted with a
+trash snapshot.  Regression for the pre-0.5.5 subtask-doubling bug
+where `--headline-body' leaked child heading text into the parent's
+notes, causing the push callback to re-insert children as new
+headings on every sync."
+  (let ((file (make-temp-file "gtasks-dedup" nil ".org")))
+    (unwind-protect
+        (progn
+          (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+            (kill-buffer "*org-mode-google-tasks-sync-trash*"))
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    ;; Two top-level headings sharing GTASK_ID "dup-top".
+                    "** TODO Top A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: dup-top\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Top B (duplicate of A)\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: dup-top\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    ;; A parent with two subtask headings sharing GTASK_ID "dup-sub".
+                    "** TODO Parent\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: parent-1\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "*** TODO Sub A\n"
+                    "    :PROPERTIES:\n"
+                    "    :GTASK_ID: dup-sub\n"
+                    "    :GTASK_LIST: L\n"
+                    "    :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "    :GTASK_CONTENT_HASH: x\n"
+                    "    :END:\n"
+                    "*** TODO Sub B (duplicate of Sub A)\n"
+                    "    :PROPERTIES:\n"
+                    "    :GTASK_ID: dup-sub\n"
+                    "    :GTASK_LIST: L\n"
+                    "    :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "    :GTASK_CONTENT_HASH: x\n"
+                    "    :END:\n"))
+          (let* ((remote `(((id . "dup-top")
+                            (title . "Top B (duplicate of A)")
+                            (status . "needsAction")
+                            (updated . "2026-01-01T00:00:00.000Z"))
+                           ((id . "parent-1")
+                            (title . "Parent")
+                            (status . "needsAction")
+                            (updated . "2026-01-01T00:00:00.000Z"))
+                           ((id . "dup-sub")
+                            (title . "Sub B (duplicate of Sub A)")
+                            (status . "needsAction")
+                            (parent . "parent-1")
+                            (updated . "2026-01-01T00:00:00.000Z")))))
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                       (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                        (lambda (_token _list-id _tasks _file done)
+                          (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                        (lambda (_token _list-id _pairs _file done)
+                          (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                        (lambda (_token _list-id _parent _file done)
+                          (funcall done))))
+              ;; Incremental mode: dedup must run even when the IDs are
+              ;; present in the remote response.
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'incremental
+               remote
+               #'ignore)))
+          (with-current-buffer (find-file-noselect file)
+            (widen)
+            (goto-char (point-min))
+            ;; Exactly one heading per GTASK_ID survives.
+            (should (re-search-forward "Top B" nil t))
+            (should-not (re-search-forward "Top A$" nil t))
+            (should (re-search-forward "Sub B" nil t))
+            (should-not (re-search-forward "Sub A$" nil t))
+            ;; Duplicates were snapshotted to trash.
+            (with-current-buffer (get-buffer-create
+                                  "*org-mode-google-tasks-sync-trash*")
+              (goto-char (point-min))
+              (should (re-search-forward "Top A" nil t))
+              (should (re-search-forward "Sub A" nil t)))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file)
+      (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+        (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
+
 ;;; -- showCompleted pinned in list-tasks query -------------------------------
 
 ;;; -- hidden tasks are filtered and removed locally --------------------------

@@ -416,7 +416,14 @@ removed via `--delete-local' with reason `hidden-archived'
 \(snapshotted to trash; restoring creates a fresh task because the
 original is unreachable on the server).  This runs in both
 `incremental' and `full' modes — unlike the full-sync sweep, which
-only fires in `full' mode."
+only fires in `full' mode.
+
+Duplicate GTASK_IDs (multiple local headings sharing the same ID)
+are also removed in both modes: all but the last heading per ID are
+deleted via `--delete-local' with reason `duplicate' (snapshotted to
+trash).  This auto-heals the duplication caused by the pre-0.5.5
+`--headline-body' bug where parent notes leaked child heading text
+into the push callback, and guards against any future regression."
   (setq org-mode-google-tasks-sync-engine--state 'applying)
   (with-current-buffer (find-file-noselect file)
     (let* ((local (org-mode-google-tasks-sync-org-collect-tasks-under file parent list-id))
@@ -432,11 +439,15 @@ only fires in `full' mode."
            (top-level (cl-remove-if (lambda (r) (alist-get 'parent r)) visible))
            (subtasks (cl-remove-if-not (lambda (r) (alist-get 'parent r)) visible))
            (new-tasks nil)
+           (dupes nil)
            (drift-snapshot (org-mode-google-tasks-sync-engine--snapshot-sibling-order
                             parent-marker)))
       (dolist (l local)
         (when (org-mode-google-tasks-sync-org-task-id l)
-          (puthash (org-mode-google-tasks-sync-org-task-id l) l local-by-id)))
+          (let ((id (org-mode-google-tasks-sync-org-task-id l)))
+            (when (gethash id local-by-id)
+              (push (gethash id local-by-id) dupes))
+            (puthash id l local-by-id))))
       (dolist (r visible)
         (puthash (alist-get 'id r) r remote-by-id))
       ;; Hidden-task removal: runs in both incremental and full modes.
@@ -452,6 +463,23 @@ only fires in `full' mode."
               (org-mode-google-tasks-sync-engine--log
                "Removed local (hidden server-side): %s"
                (org-mode-google-tasks-sync-org-task-title local-task))))))
+      ;; Duplicate-ID removal: runs in both incremental and full modes.
+      ;; `puthash' above silently overwrites earlier headings with the
+      ;; same GTASK_ID, leaving the shadowed copies invisible to
+      ;; reconciliation.  Without this pass they would survive every
+      ;; tick and accumulate (the pre-0.5.5 `--headline-body' bug
+      ;; doubled subtasks on every sync).  The last heading per ID wins
+      ;; (it's the one in `local-by-id'); all earlier shadows are
+      ;; deleted with a trash snapshot so recovery is possible.  Covers
+      ;; duplicates at any level — top-level tasks and subtasks alike —
+      ;; because `local' contains all collected headings up to 2 levels
+      ;; deep.
+      (when dupes
+        (dolist (dupe dupes)
+          (org-mode-google-tasks-sync-engine--delete-local dupe file 'duplicate)
+          (org-mode-google-tasks-sync-engine--log
+           "Removed duplicate local (same GTASK_ID): %s"
+           (org-mode-google-tasks-sync-org-task-title dupe))))
       ;; Pass 1: top-level tasks (no parent).
       (dolist (r top-level)
         (org-mode-google-tasks-sync-engine--reconcile-one
