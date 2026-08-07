@@ -374,19 +374,23 @@ taken at tick start, before pulls rewrote positions).  DONE is
 called when all post-push work is finished.  Reorder drift is
 resolved first (pushing the user's manual reorder to the server),
 then tie repair, then sort — so the sort converges to the user's
-intended order."
+intended order.  The sort/save/stamp tail runs inside
+`with-current-buffer' on FILE so it targets the org buffer even
+when the caller is a plz `:then' callback whose `current-buffer'
+is the curl process buffer."
   (org-mode-google-tasks-sync-engine--resolve-reorder-drift
-   token list-id drift-pairs
+   token list-id drift-pairs file
    (lambda ()
      (org-mode-google-tasks-sync-engine--repair-position-ties
-      token list-id parent-marker
+      token list-id parent-marker file
       (lambda ()
-        (org-mode-google-tasks-sync-engine--sort-children parent-marker)
-        (org-mode-google-tasks-sync-engine--set-last-sync
-         file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
-        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
-          (save-buffer))
-        (funcall done))))))
+        (with-current-buffer (find-file-noselect file)
+          (org-mode-google-tasks-sync-engine--sort-children parent-marker)
+          (org-mode-google-tasks-sync-engine--set-last-sync
+           file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
+          (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+            (save-buffer))
+          (funcall done)))))))
 
 (defun org-mode-google-tasks-sync-engine--apply
     (token list-id file parent mode remote-tasks done)
@@ -537,24 +541,27 @@ position.  Returns nil when all positions are unique."
           (nreverse pairs))))))
 
 (defun org-mode-google-tasks-sync-engine--repair-position-ties
-    (token list-id parent-marker done)
+    (token list-id parent-marker file done)
   "Fire `tasks.move' for siblings with duplicate :GTASK_POSITION: values.
 TOKEN authenticates the calls.  LIST-ID is the Google Tasks list.
-PARENT-MARKER locates the subtree.  DONE is called when all tie
-repairs have completed (or immediately when there are no ties).
-Each move response writes the fresh position into the heading's
-property, ensuring the subsequent `--sort-children' produces a
-stable order."
+PARENT-MARKER locates the subtree.  FILE is the source org file,
+threaded to `--write-move-result' so the position write targets the
+org buffer even when the callback fires in a plz curl buffer.  DONE
+is called when all tie repairs have completed (or immediately when
+there are no ties).  Each move response writes the fresh position
+into the heading's property, ensuring the subsequent `--sort-children'
+produces a stable order."
   (let ((pairs (org-mode-google-tasks-sync-engine--collect-tie-pairs parent-marker)))
     (if (null pairs)
         (funcall done)
       (org-mode-google-tasks-sync-engine--repair-tie-queue
-       token list-id pairs done))))
+       token list-id pairs file done))))
 
 (defun org-mode-google-tasks-sync-engine--repair-tie-queue
-    (token list-id pairs done)
+    (token list-id pairs file done)
   "Process PAIRS serially, calling DONE when the queue is empty.
 TOKEN authenticates each move.  LIST-ID is the Google Tasks list.
+FILE is the source org file, threaded to `--write-move-result'.
 Each pair is (ID . PREV-ID); `tasks.move' is called with
 `previous=PREV-ID' to give ID a unique position after PREV-ID."
   (if (null pairs)
@@ -565,24 +572,29 @@ Each pair is (ID . PREV-ID); `tasks.move' is called with
       (org-mode-google-tasks-sync-api-move-task
        token list-id task-id
        (lambda (resp)
-         (org-mode-google-tasks-sync-engine--write-move-result task-id resp)
+         (org-mode-google-tasks-sync-engine--write-move-result task-id resp file)
          (org-mode-google-tasks-sync-engine--repair-tie-queue
-          token list-id (cdr pairs) done))
+          token list-id (cdr pairs) file done))
        (lambda (err)
          (org-mode-google-tasks-sync-engine--log
           "Tie repair move error: %S (task=%s)" err task-id)
          (org-mode-google-tasks-sync-engine--repair-tie-queue
-          token list-id (cdr pairs) done))
+          token list-id (cdr pairs) file done))
        nil prev-id))))
 
-(defun org-mode-google-tasks-sync-engine--write-move-result (task-id resp)
+(defun org-mode-google-tasks-sync-engine--write-move-result (task-id resp &optional file)
   "Write the position from a move RESP into the heading with :GTASK_ID: TASK-ID.
 Called after `tasks.move' returns a fresh position for a tie-repair
-move.  Searches the current buffer for the heading by GTASK_ID."
-  (let ((position (alist-get 'position resp)))
-    (when position
+or drift-resolution move.  Searches the org buffer for the heading by
+GTASK_ID.  FILE is the source org file; when given, the search happens
+in that buffer (via `find-file-noselect') so this works even when the
+caller's `current-buffer' is a plz curl buffer.  Falls back to
+`(buffer-file-name)' for legacy callers."
+  (let ((position (alist-get 'position resp))
+        (search-file (or file (buffer-file-name))))
+    (when (and position search-file)
       (let ((marker (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
-                     (buffer-file-name) task-id)))
+                     search-file task-id)))
         (when (and marker (marker-buffer marker))
           (with-current-buffer (marker-buffer marker)
             (save-excursion
@@ -653,13 +665,15 @@ immediately before ID in buffer order (nil for the first sibling)."
         (nreverse pairs)))))
 
 (defun org-mode-google-tasks-sync-engine--resolve-reorder-drift
-    (token list-id drift-pairs done)
+    (token list-id drift-pairs file done)
   "Fire `tasks.move' for each pair in DRIFT-PAIRS, serially.
-TOKEN authenticates.  LIST-ID is the Google Tasks list.  DONE is
-called when all moves complete (or immediately when no drift).
-Each pair is (ID . PREV-ID); the move sets `previous=PREV-ID' so
-Google places ID right after PREV-ID, reconstructing the buffer
-order on the server."
+TOKEN authenticates.  LIST-ID is the Google Tasks list.  FILE is the
+source org file, threaded to `--write-move-result' so the position
+write targets the org buffer even when the callback fires in a plz
+curl buffer.  DONE is called when all moves complete (or immediately
+when no drift).  Each pair is (ID . PREV-ID); the move sets
+`previous=PREV-ID' so Google places ID right after PREV-ID,
+reconstructing the buffer order on the server."
   (if (null drift-pairs)
       (funcall done)
     (let* ((pair (car drift-pairs))
@@ -668,14 +682,14 @@ order on the server."
       (org-mode-google-tasks-sync-api-move-task
        token list-id task-id
        (lambda (resp)
-         (org-mode-google-tasks-sync-engine--write-move-result task-id resp)
+         (org-mode-google-tasks-sync-engine--write-move-result task-id resp file)
          (org-mode-google-tasks-sync-engine--resolve-reorder-drift
-          token list-id (cdr drift-pairs) done))
+          token list-id (cdr drift-pairs) file done))
        (lambda (err)
          (org-mode-google-tasks-sync-engine--log
           "Reorder drift move error: %S (task=%s)" err task-id)
          (org-mode-google-tasks-sync-engine--resolve-reorder-drift
-          token list-id (cdr drift-pairs) done))
+          token list-id (cdr drift-pairs) file done))
        nil prev-id))))
 
 (defun org-mode-google-tasks-sync-engine--back-to-heading-safe ()
@@ -1057,9 +1071,9 @@ Async callbacks (`--push-new', `--push-update', the 412 finalizer) fire
 after the engine has potentially mutated the buffer (sort, sweep,
 inserts); a stale marker can land on the wrong heading and clobber it.
 Verifies the heading at the marker has the same title as TASK before
-writing.  On mismatch: log a warning and skip the write — the next
-tick's reconciliation will fix the buffer naturally.  Returns non-nil
-when the write ran."
+writing.  On mismatch or when the marker has no live buffer: log a
+warning and skip the write — the next tick's reconciliation will fix
+the buffer naturally.  Returns non-nil when the write ran."
   (let ((m (org-mode-google-tasks-sync-org-task-marker task))
         (title (org-mode-google-tasks-sync-org-task-title task)))
     (if (and m (marker-buffer m))
@@ -1077,8 +1091,10 @@ when the write ran."
                  "WARN: marker detached for %S; heading at marker is %S; skipping in-place write"
                  title actual)
                 nil))))
-      (org-mode-google-tasks-sync-org-write-task task)
-      t)))
+      (org-mode-google-tasks-sync-engine--log
+       "WARN: no live marker for %S; skipping in-place write"
+       title)
+      nil)))
 
 (defun org-mode-google-tasks-sync-engine--push-new
     (token list-id task &optional file on-success)
@@ -1191,12 +1207,18 @@ create a fresh one (deleted)."
         "Trash snapshot failed (task=%s): %S"
         (org-mode-google-tasks-sync-org-task-title task) err))))
   (when (org-mode-google-tasks-sync-org-task-marker task)
-    (save-excursion
-      (goto-char (org-mode-google-tasks-sync-org-task-marker task))
-      (org-back-to-heading t)
-      (let ((begin (point))
-            (end (save-excursion (org-end-of-subtree t t) (point))))
-        (delete-region begin end))))
+    (let ((m (org-mode-google-tasks-sync-org-task-marker task)))
+      (if (and m (marker-buffer m))
+          (with-current-buffer (marker-buffer m)
+            (save-excursion
+              (goto-char m)
+              (org-back-to-heading t)
+              (let ((begin (point))
+                    (end (save-excursion (org-end-of-subtree t t) (point))))
+                (delete-region begin end))))
+        (org-mode-google-tasks-sync-engine--log
+         "WARN: delete-local marker has no buffer for %S; skipping in-place deletion"
+         (org-mode-google-tasks-sync-org-task-title task)))))
   (org-mode-google-tasks-sync-engine--log "Deleted local: %s"
                                      (org-mode-google-tasks-sync-org-task-title task)))
 

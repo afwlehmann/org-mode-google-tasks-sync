@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: MIT
 
 ;; Author: Alexander Lehmann <afwlehmann@googlemail.com>
-;; Version: 0.5.3
+;; Version: 0.5.4
 ;; Package-Requires: ((emacs "27.1") (plz "0.7") (oauth2 "0.16") (org "9.5"))
 ;; Keywords: org, calendar, tools
 
@@ -903,17 +903,31 @@ appended as its last child.  Refuses if the heading has subtasks
 When HEADING-MARKER is nil, writes at point (legacy callers).  Goes
 through the marker so an async callback (e.g. `--apply-server-move's
 :then) doesn't accidentally stamp the props onto whatever heading
-point happens to be on when the callback fires."
-  (save-excursion
-    (when heading-marker
-      (goto-char heading-marker))
-    (org-back-to-heading t)
-    (when (and updated (fboundp 'org-entry-put))
-      (org-entry-put nil "GTASK_UPDATED" updated))
-    (when (and etag (fboundp 'org-entry-put))
-      (org-entry-put nil "GTASK_ETAG" etag))
-    (when (and position (fboundp 'org-entry-put))
-      (org-entry-put nil "GTASK_POSITION" position))))
+point happens to be on when the callback fires.  When the marker
+has a live buffer, switches to it first so the write lands in the
+org buffer even when the caller's `current-buffer' is a plz curl
+buffer."
+  (if (and heading-marker (marker-buffer heading-marker))
+      (with-current-buffer (marker-buffer heading-marker)
+        (save-excursion
+          (goto-char heading-marker)
+          (org-back-to-heading t)
+          (when (and updated (fboundp 'org-entry-put))
+            (org-entry-put nil "GTASK_UPDATED" updated))
+          (when (and etag (fboundp 'org-entry-put))
+            (org-entry-put nil "GTASK_ETAG" etag))
+          (when (and position (fboundp 'org-entry-put))
+            (org-entry-put nil "GTASK_POSITION" position))))
+    (save-excursion
+      (when heading-marker
+        (goto-char heading-marker))
+      (org-back-to-heading t)
+      (when (and updated (fboundp 'org-entry-put))
+        (org-entry-put nil "GTASK_UPDATED" updated))
+      (when (and etag (fboundp 'org-entry-put))
+        (org-entry-put nil "GTASK_ETAG" etag))
+      (when (and position (fboundp 'org-entry-put))
+        (org-entry-put nil "GTASK_POSITION" position)))))
 
 (defun org-mode-google-tasks-sync--refresh-content-hash-at (heading-marker)
   "Recompute and write :GTASK_CONTENT_HASH: at HEADING-MARKER.

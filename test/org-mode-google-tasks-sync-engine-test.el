@@ -467,10 +467,10 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
                        (lambda (_token _list-id _tasks _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
-                       (lambda (_token _list-id _pairs done)
+                       (lambda (_token _list-id _pairs _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
-                       (lambda (_token _list-id _parent done)
+                       (lambda (_token _list-id _parent _file done)
                          (funcall done))))
               (org-mode-google-tasks-sync-engine--apply
                nil "L" file "Tasks" 'full
@@ -566,10 +566,10 @@ gated on `full' like the absent-id sweep)."
                        (lambda (_token _list-id _tasks _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
-                       (lambda (_token _list-id _pairs done)
+                       (lambda (_token _list-id _pairs _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
-                       (lambda (_token _list-id _parent done)
+                       (lambda (_token _list-id _parent _file done)
                          (funcall done))))
               (org-mode-google-tasks-sync-engine--apply
                nil "L" file "Tasks" 'incremental remote #'ignore))))
@@ -610,10 +610,10 @@ inserted — the hidden filter drops it before the pull pass."
                        (lambda (_token _list-id _tasks _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
-                       (lambda (_token _list-id _pairs done)
+                       (lambda (_token _list-id _pairs _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
-                       (lambda (_token _list-id _parent done)
+                       (lambda (_token _list-id _parent _file done)
                          (funcall done))))
               (org-mode-google-tasks-sync-engine--apply
                nil "L" file "Tasks" 'incremental remote #'ignore))))
@@ -988,7 +988,7 @@ happens to be in)."
                                       (re-search-forward "^\\* Tasks")
                                       (point-marker))))
                 (org-mode-google-tasks-sync-engine--repair-position-ties
-                 nil "L" parent-marker #'ignore)))))
+                 nil "L" parent-marker file #'ignore)))))
       (should (= 1 (length captured-moves)))
       (should (equal "id-b" (caar captured-moves)))
       (should (equal "id-a" (cdar captured-moves)))
@@ -1032,7 +1032,7 @@ happens to be in)."
                                       (re-search-forward "^\\* Tasks")
                                       (point-marker))))
                 (org-mode-google-tasks-sync-engine--repair-position-ties
-                 nil "L" parent-marker #'ignore)))))
+                 nil "L" parent-marker file #'ignore)))))
       (should (eq 0 move-count))
       (with-current-buffer (find-file-noselect file)
         (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
@@ -1083,8 +1083,8 @@ changed, and the engine pushes the new order to the server."
                          (lambda (_token _list-id task-id then _else _parent previous-id)
                            (push (cons task-id previous-id) captured-moves)
                            (funcall then '((position . "00000000000000000003"))))))
-                (org-mode-google-tasks-sync-engine--resolve-reorder-drift
-                 nil "L" drift #'ignore)))))
+                 (org-mode-google-tasks-sync-engine--resolve-reorder-drift
+                  nil "L" drift file #'ignore)))))
       ;; Buffer order is B, A.  Sorted order is A, B.  They differ, so
       ;; every task gets a move with its buffer predecessor:
       ;; B -> previous=nil (first), A -> previous=id-b (second).
@@ -1193,10 +1193,10 @@ stuck at `applying'."
                        (lambda (_token _list-id _tasks _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
-                       (lambda (_token _list-id _pairs done)
+                       (lambda (_token _list-id _pairs _file done)
                          (funcall done)))
                       ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
-                       (lambda (_token _list-id _parent done)
+                       (lambda (_token _list-id _parent _file done)
                          (funcall done))))
               ;; Must not raise.
               (org-mode-google-tasks-sync-engine--apply
@@ -1240,6 +1240,155 @@ the next entry or return to `idle'."
             (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
               (set-buffer-modified-p nil))
             (kill-buffer)))
+      (delete-file file))))
+
+;;; -- async-callback buffer safety -------------------------------------------
+;;
+;; plz invokes `:then' callbacks with the curl process buffer as
+;; `current-buffer' (a `fundamental-mode' buffer named
+;; ` *plz-request-curl*...').  Functions that mutate org headings from
+;; these callbacks must switch to the org buffer via the marker, not
+;; rely on the caller's `current-buffer'.  These tests simulate that
+;; scenario by making a non-org temp buffer current before calling the
+;; fixed functions.
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/delete-local-writes-org-buffer-not-current-when-called-from-non-org-buffer ()
+  "`--delete-local' must delete the heading in the marker's buffer,
+not in `current-buffer' (which may be a plz curl buffer when called
+from an async `:then' callback)."
+  (let ((file (make-temp-file "gtasks-delete-local-cb" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Foo\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: foo-id\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :END:\n"))
+          (let (org-marker)
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "^\\*\\* ")
+                (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L")))
+                  (setq org-marker (org-mode-google-tasks-sync-org-task-marker task))
+                  ;; Simulate a plz :then callback: switch to a
+                  ;; fundamental-mode temp buffer before calling.
+                  (with-temp-buffer
+                    (should (eq (current-buffer) (get-buffer (buffer-name))))
+                    (should-not (derived-mode-p 'org-mode))
+                    (org-mode-google-tasks-sync-engine--delete-local task file)))))
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (should-not (re-search-forward "^\\*\\* TODO Foo" nil t)))
+              (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+                (set-buffer-modified-p nil))
+              (kill-buffer))))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/write-move-result-writes-to-file-not-current-when-called-from-non-org-buffer ()
+  "`--write-move-result' must write the position into the org FILE,
+not into `current-buffer' (which may be a plz curl buffer when called
+from a drift/tie-repair `:then' callback).  FILE is now threaded
+through explicitly."
+  (let ((file (make-temp-file "gtasks-move-result-cb" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Foo\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: foo-id\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :END:\n"))
+          ;; Simulate a plz :then callback: switch to a non-org temp
+          ;; buffer before calling.  Pass FILE explicitly.
+          (with-temp-buffer
+            (should-not (derived-mode-p 'org-mode))
+            (org-mode-google-tasks-sync-engine--write-move-result
+             "foo-id"
+             '((position . "00000000000000000042"))
+             file))
+          (with-current-buffer (find-file-noselect file)
+            (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\* ")
+              (should (equal "00000000000000000042"
+                             (org-entry-get nil "GTASK_POSITION"))))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/write-task-if-marker-matches-skips-when-marker-has-no-buffer ()
+  "When the marker has no live buffer, `--write-task-if-marker-matches'
+must NOT fall through to writing at point in the current (possibly
+plz) buffer.  It should log and return nil."
+  (let ((org-buf (generate-new-buffer " *org-marker-test*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer org-buf
+            (org-mode)
+            (insert "* Tasks\n** TODO Foo\n")
+            (goto-char (point-min))
+            (re-search-forward "^\\*\\* ")
+            (let ((task (make-org-mode-google-tasks-sync-org-task
+                         :title "Foo"
+                         :id "foo-id"
+                         :marker (point-marker))))
+              (kill-buffer org-buf)
+              (with-temp-buffer
+                (should-not (derived-mode-p 'org-mode))
+                (should-not
+                 (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task)))))
+      (when (buffer-live-p org-buf)
+        (kill-buffer org-buf))))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/update-heading-server-state-writes-org-buffer-not-current-when-called-from-non-org-buffer ()
+  "`--update-heading-server-state' must write properties into the
+marker's buffer, not into `current-buffer' (which may be a plz curl
+buffer when called from `--apply-server-move's `:then' callback)."
+  (let ((file (make-temp-file "gtasks-update-heading-cb" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Foo\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: foo-id\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :END:\n"))
+          (let (heading-marker)
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "^\\*\\* ")
+                (setq heading-marker (point-marker)))
+              ;; Simulate a plz :then callback: switch to a
+              ;; fundamental-mode temp buffer before calling.
+              (with-temp-buffer
+                (should-not (derived-mode-p 'org-mode))
+                (org-mode-google-tasks-sync--update-heading-server-state
+                 "2026-08-07T12:00:00.000Z"
+                 "\"new-etag\""
+                 "00000000000000000042"
+                 heading-marker)))
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "^\\*\\* ")
+                (should (equal "2026-08-07T12:00:00.000Z"
+                               (org-entry-get nil "GTASK_UPDATED")))
+                (should (equal "\"new-etag\""
+                               (org-entry-get nil "GTASK_ETAG")))
+                (should (equal "00000000000000000042"
+                               (org-entry-get nil "GTASK_POSITION"))))
+              (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+                (set-buffer-modified-p nil))
+              (kill-buffer))))
       (delete-file file))))
 
 (provide 'org-mode-google-tasks-sync-engine-test)
