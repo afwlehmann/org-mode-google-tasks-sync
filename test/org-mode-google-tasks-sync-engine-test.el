@@ -1248,6 +1248,161 @@ position-sorted order — no moves are fired."
         (kill-buffer))
       (delete-file file))))
 
+;;; -- reorder drift detection: subtask level (B1) ----------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/detect-reorder-drift-fires-moves-at-subtask-level ()
+  "`--snapshot-sibling-order' walks the subtask level too, so a
+manual cut/paste reorder among subtasks produces drift pairs.
+Regression for the bug where the snapshot only walked direct
+children of the configured parent, leaving subtask reorders
+undetected (the next sort would silently undo them)."
+  (let ((file (make-temp-file "gtasks-drift-sub" nil ".org"))
+        captured-moves)
+    (unwind-protect
+        (progn
+          ;; Top-level Parent has subtasks B-sub (pos 2) then A-sub (pos 1)
+          ;; — user swapped them.  Top-level order is aligned.
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Parent\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-parent\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "*** TODO B-sub\n"
+                    "    :PROPERTIES:\n"
+                    "    :GTASK_ID: id-bsub\n"
+                    "    :GTASK_LIST: L\n"
+                    "    :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "    :GTASK_POSITION: 00000000000000000002\n"
+                    "    :GTASK_CONTENT_HASH: x\n"
+                    "    :END:\n"
+                    "*** TODO A-sub\n"
+                    "    :PROPERTIES:\n"
+                    "    :GTASK_ID: id-asub\n"
+                    "    :GTASK_LIST: L\n"
+                    "    :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "    :GTASK_POSITION: 00000000000000000001\n"
+                    "    :GTASK_CONTENT_HASH: x\n"
+                    "    :END:\n"))
+          (with-current-buffer (find-file-noselect file)
+            (let* ((parent-marker (save-excursion
+                                    (goto-char (point-min))
+                                    (re-search-forward "^\\* Tasks")
+                                    (point-marker)))
+                   (snapshots (org-mode-google-tasks-sync-engine--snapshot-sibling-order
+                               parent-marker))
+                   (drift (org-mode-google-tasks-sync-engine--detect-reorder-drift
+                           snapshots)))
+              ;; Top-level snapshot is aligned (single child "id-parent"),
+              ;; so no drift there; subtask snapshot differs.
+              (should (equal 2 (length snapshots)))
+              (should (equal '("id-parent") (car (nth 0 snapshots))))
+              (should (equal '("id-bsub" "id-asub") (car (nth 1 snapshots))))
+              (should (equal '("id-asub" "id-bsub") (cdr (nth 1 snapshots))))
+              (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                         (lambda (_token _list-id task-id then _else _parent previous-id)
+                           (push (cons task-id previous-id) captured-moves)
+                           (funcall then '((position . "00000000000000000003"))))))
+                (org-mode-google-tasks-sync-engine--resolve-reorder-drift
+                 nil "L" drift file #'ignore)))))
+      ;; Subtask buffer order: B-sub, A-sub.  Sorted: A-sub, B-sub.
+      ;; Drift pairs: B-sub -> previous=nil, A-sub -> previous=id-bsub.
+      ;; Mock uses push, so captured-moves is reversed: last (A-sub) first.
+      (should (= 2 (length captured-moves)))
+      (should (equal "id-asub" (caar captured-moves)))
+      (should (equal "id-bsub" (cdar captured-moves)))
+      (should (equal "id-bsub" (car (cadr captured-moves))))
+      (should (null (cdr (cadr captured-moves))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/snapshot-sibling-order-nil-when-no-synced-children ()
+  "`--snapshot-sibling-order' returns nil when the configured parent
+has no synced children (no snapshots to compare)."
+  (let ((file (make-temp-file "gtasks-empty" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n** TODO Local only (no ID)\n"))
+          (with-current-buffer (find-file-noselect file)
+            (let* ((parent-marker (save-excursion
+                                    (goto-char (point-min))
+                                    (re-search-forward "^\\* Tasks")
+                                    (point-marker))))
+              (should (null (org-mode-google-tasks-sync-engine--snapshot-sibling-order
+                             parent-marker))))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+;;; -- position-tie repair: subtask level -------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/repair-ties-fires-move-for-duplicate-subtask-positions ()
+  "`--repair-position-ties' recurses into the subtask level so two
+adjacent subtasks sharing the same :GTASK_POSITION: are repaired.
+Regression for the bug where only direct children of the configured
+parent were walked, leaving subtask tie collisions unrepaired (the
+subsequent sort would produce an unstable order among subtasks)."
+  (let ((file (make-temp-file "gtasks-tie-sub" nil ".org"))
+        captured-moves)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Parent\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-parent\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "*** TODO A-sub\n"
+                    "    :PROPERTIES:\n"
+                    "    :GTASK_ID: id-asub\n"
+                    "    :GTASK_LIST: L\n"
+                    "    :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "    :GTASK_POSITION: 00000000000000000000\n"
+                    "    :GTASK_CONTENT_HASH: x\n"
+                    "    :END:\n"
+                    "*** TODO B-sub (duplicate position)\n"
+                    "    :PROPERTIES:\n"
+                    "    :GTASK_ID: id-bsub\n"
+                    "    :GTASK_LIST: L\n"
+                    "    :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "    :GTASK_POSITION: 00000000000000000000\n"
+                    "    :GTASK_CONTENT_HASH: x\n"
+                    "    :END:\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                     (lambda (_token _list-id task-id then _else new-parent previous-id)
+                       (push (cons task-id previous-id) captured-moves)
+                       (funcall then '((position . "00000000000000000001"))))))
+            (with-current-buffer (find-file-noselect file)
+              (let ((parent-marker (save-excursion
+                                     (goto-char (point-min))
+                                     (re-search-forward "^\\* Tasks")
+                                     (point-marker))))
+                (org-mode-google-tasks-sync-engine--repair-position-ties
+                 nil "L" parent-marker file #'ignore)))))
+      ;; Only the subtask pair has a tie; top-level is unique.
+      (should (= 1 (length captured-moves)))
+      (should (equal "id-bsub" (caar captured-moves)))
+      (should (equal "id-asub" (cdar captured-moves)))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
 ;;; -- sort resilience: #+ keywords before first heading ---------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/sort-children-does-not-error-with-keywords-before-first-heading ()

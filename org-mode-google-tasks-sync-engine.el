@@ -547,31 +547,55 @@ nil or points at no heading."
 
 (defun org-mode-google-tasks-sync-engine--collect-tie-pairs (parent-marker)
   "Return (ID . PREV-ID) pairs for synced siblings with duplicate positions.
-Walks direct synced children of PARENT-MARKER in buffer order.  When
-two adjacent siblings share the same :GTASK_POSITION:, the second
-one needs a `tasks.move' with `previous=<first-id>' to get a unique
-position.  Returns nil when all positions are unique."
+Walks direct synced children of PARENT-MARKER in buffer order, then
+recurses one level into each synced child's subtree — matching the
+2-level sync depth of `collect-tasks-under'.  When two adjacent
+siblings share the same :GTASK_POSITION:, the second one needs a
+`tasks.move' with `previous=<first-id>' to get a unique position.
+Returns nil when all positions are unique."
   (when (and parent-marker (marker-buffer parent-marker))
     (with-current-buffer (marker-buffer parent-marker)
       (save-excursion
         (goto-char parent-marker)
         (org-back-to-heading t)
-        (let ((parent-level (org-current-level))
-              (pairs nil)
-              (prev-id nil)
-              (prev-pos nil))
-          (when (org-goto-first-child)
-            (while (and (not (eobp))
-                        (= (org-current-level) (1+ parent-level)))
-              (let ((id (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))
-                    (pos (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))
-                (when (and id pos prev-id prev-pos (equal pos prev-pos))
-                  (push (cons id prev-id) pairs))
-                (setq prev-id id
-                      prev-pos pos))
-              (unless (org-get-next-sibling)
-                (goto-char (point-max)))))
-          (nreverse pairs))))))
+        (let (pairs)
+          ;; Direct children of the configured parent (top-level tasks).
+          (when-let ((level-pairs
+                      (org-mode-google-tasks-sync-engine--collect-tie-pairs-one-level)))
+            (setq pairs (nconc pairs (nreverse level-pairs))))
+          ;; One level of subtasks under each synced top-level task.
+          (dolist (child-marker
+                   (org-mode-google-tasks-sync-engine--child-markers))
+            (save-excursion
+              (goto-char child-marker)
+              (when-let ((level-pairs
+                          (org-mode-google-tasks-sync-engine--collect-tie-pairs-one-level)))
+                (setq pairs (nconc pairs (nreverse level-pairs))))))
+          pairs)))))
+
+(defun org-mode-google-tasks-sync-engine--collect-tie-pairs-one-level ()
+  "Return (ID . PREV-ID) pairs for duplicate positions among direct children.
+Walks the direct synced children of the heading at point.  When two
+adjacent synced siblings share the same :GTASK_POSITION:, the second
+needs a `tasks.move' with `previous=<first-id>'.  Returns nil when
+all positions are unique or there are no synced children."
+  (let ((parent-level (org-current-level))
+        (pairs nil)
+        (prev-id nil)
+        (prev-pos nil))
+    (save-excursion
+      (when (org-goto-first-child)
+        (while (and (not (eobp))
+                    (= (org-current-level) (1+ parent-level)))
+          (let ((id (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))
+                (pos (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))
+            (when (and id pos prev-id prev-pos (equal pos prev-pos))
+              (push (cons id prev-id) pairs))
+            (setq prev-id id
+                  prev-pos pos))
+          (unless (org-get-next-sibling)
+            (goto-char (point-max))))))
+    pairs))
 
 (defun org-mode-google-tasks-sync-engine--repair-position-ties
     (token list-id parent-marker file done)
@@ -647,55 +671,97 @@ caller's `current-buffer' is a plz curl buffer.  Falls back to
 ;; predecessor>', reconstructing the user's intended order server-side.
 
 (defun org-mode-google-tasks-sync-engine--snapshot-sibling-order (parent-marker)
-  "Return (BUFFER-IDS . SORTED-IDS) for synced children of PARENT-MARKER.
-BUFFER-IDS is the list of GTASK_IDs in physical buffer order.
+  "Return a list of (BUFFER-IDS . SORTED-IDS) snapshots for synced children.
+One snapshot per parent heading whose direct children include at
+least one synced task, walked to the same 2-level depth as
+`org-mode-google-tasks-sync-org-collect-tasks-under' so manual
+cut/paste reorders are detected at both the top-level and subtask
+levels.  Each snapshot's BUFFER-IDS is the list of GTASK_IDs of the
+parent's synced direct children in physical buffer order;
 SORTED-IDS is the same list stably sorted by :GTASK_POSITION:.
-When the two lists differ, a manual reorder has occurred.
-Returns (nil . nil) when PARENT-MARKER is invalid."
+When the two lists differ for any parent, a manual reorder has
+occurred at that level.  Returns nil when PARENT-MARKER is invalid."
   (if (not (and parent-marker (marker-buffer parent-marker)))
-      (cons nil nil)
+      nil
     (with-current-buffer (marker-buffer parent-marker)
       (save-excursion
         (goto-char parent-marker)
         (org-back-to-heading t)
-        (let ((parent-level (org-current-level))
-              (entries nil))
-          (when (org-goto-first-child)
-            (while (and (not (eobp))
-                        (= (org-current-level) (1+ parent-level)))
-              (let ((id (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))
-                    (pos (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))
-                (when id
-                  (push (cons id (or pos "")) entries)))
-              (unless (org-get-next-sibling)
-                (goto-char (point-max)))))
-          (let* ((rev (reverse entries))
-                 (buffer-ids (mapcar #'car rev))
-                 (sorted-ids (mapcar #'car
-                                     (sort (copy-sequence rev)
-                                           (lambda (a b)
-                                             (string< (cdr a) (cdr b)))))))
-            (cons buffer-ids sorted-ids)))))))
+        (let (snapshots)
+          ;; Direct children of the configured parent (top-level tasks),
+          ;; then one level of subtasks under each — matching the 2-level
+          ;; sync depth of `collect-tasks-under'.
+          (when-let ((snap (org-mode-google-tasks-sync-engine--snapshot-one-level)))
+            (push snap snapshots))
+          (dolist (child-marker
+                   (org-mode-google-tasks-sync-engine--child-markers))
+            (save-excursion
+              (goto-char child-marker)
+              (when-let ((snap (org-mode-google-tasks-sync-engine--snapshot-one-level)))
+                (push snap snapshots))))
+          (nreverse snapshots))))))
 
-(defun org-mode-google-tasks-sync-engine--detect-reorder-drift (snapshot)
+(defun org-mode-google-tasks-sync-engine--snapshot-one-level ()
+  "Return (BUFFER-IDS . SORTED-IDS) for synced direct children at point.
+Walks the direct synced children of the heading at point.  Returns
+nil when the heading has no synced children."
+  (let ((parent-level (org-current-level))
+        (entries nil))
+    (save-excursion
+      (when (org-goto-first-child)
+        (while (and (not (eobp))
+                    (= (org-current-level) (1+ parent-level)))
+          (let ((id (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))
+                (pos (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))
+            (when id
+              (push (cons id (or pos "")) entries)))
+          (unless (org-get-next-sibling)
+            (goto-char (point-max))))))
+    (when entries
+      (let* ((rev (reverse entries))
+             (buffer-ids (mapcar #'car rev))
+             (sorted-ids (mapcar #'car
+                                 (sort (copy-sequence rev)
+                                       (lambda (a b)
+                                         (string< (cdr a) (cdr b)))))))
+        (cons buffer-ids sorted-ids)))))
+
+(defun org-mode-google-tasks-sync-engine--child-markers ()
+  "Return markers for the direct child headings of the heading at point.
+Each marker is a sticky `point-marker' so it stays valid across the
+sibling walk.  The walk uses `org-get-next-sibling' so a child's
+own subtree is never mistaken for a direct child."
+  (let ((parent-level (org-current-level))
+        (markers nil))
+    (save-excursion
+      (when (org-goto-first-child)
+        (while (and (not (eobp))
+                    (= (org-current-level) (1+ parent-level)))
+          (push (org-mode-google-tasks-sync-org--sticky-marker) markers)
+          (unless (org-get-next-sibling)
+            (goto-char (point-max))))))
+    (nreverse markers)))
+
+(defun org-mode-google-tasks-sync-engine--detect-reorder-drift (snapshots)
   "Return a list of (ID . PREV-ID) move pairs for drifted siblings.
-SNAPSHOT is the (BUFFER-IDS . SORTED-IDS) from
-`--snapshot-sibling-order'.  When the two lists are equal (no
-drift), returns nil.  When they differ, returns a pair for every
-task in buffer order whose actual buffer predecessor differs from
-what the sorted order would place before it.
-Each pair is (ID . PREV-ID) where PREV-ID is the synced sibling
-immediately before ID in buffer order (nil for the first sibling)."
-  (let ((buffer-ids (car snapshot))
-        (sorted-ids (cdr snapshot)))
-    (if (equal buffer-ids sorted-ids)
-        nil
-      (let ((pairs nil)
-            (prev-id nil))
-        (dolist (id buffer-ids)
-          (push (cons id prev-id) pairs)
-          (setq prev-id id))
-        (nreverse pairs)))))
+SNAPSHOTS is the list of (BUFFER-IDS . SORTED-IDS) from
+`--snapshot-sibling-order', one per parent level (top-level tasks
+and subtasks).  For each snapshot where the two lists differ, a
+pair is emitted for every task in buffer order whose actual buffer
+predecessor differs from what the sorted order would place before
+it.  Each pair is (ID . PREV-ID) where PREV-ID is the synced
+sibling immediately before ID in buffer order (nil for the first
+sibling at that level).  Returns nil when no level has drift."
+  (let (all-pairs)
+    (dolist (snapshot snapshots)
+      (let ((buffer-ids (car snapshot))
+            (sorted-ids (cdr snapshot)))
+        (unless (equal buffer-ids sorted-ids)
+          (let ((prev-id nil))
+            (dolist (id buffer-ids)
+              (push (cons id prev-id) all-pairs)
+              (setq prev-id id))))))
+    (nreverse all-pairs)))
 
 (defun org-mode-google-tasks-sync-engine--resolve-reorder-drift
     (token list-id drift-pairs file done)
