@@ -893,6 +893,7 @@ appends the task at the same position the user placed it locally."
     (when (and m (marker-buffer m))
       (with-current-buffer (marker-buffer m)
         (save-excursion
+          (goto-char m)
           (org-mode-google-tasks-sync-org--prev-sibling-id-at-point))))))
 
 (defun org-mode-google-tasks-sync-engine--delete-local (task &optional source-file reason)

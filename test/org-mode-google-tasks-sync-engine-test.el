@@ -700,6 +700,53 @@ tick's sort pulls the task away from its intended place."
         (kill-buffer))
       (delete-file file))))
 
+;;; -- --prev-synced-sibling-id positions on the task's marker -----------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/prev-synced-sibling-id-positions-on-marker ()
+  "`--prev-synced-sibling-id' must navigate to TASK's marker before
+searching backward for a sibling.  Without the `goto-char', it reads
+at whatever point happens to be current — returning a stale or
+wrong sibling's ID when called from `--push-new' during `--apply'
+\(where point wanders across headings)."
+  (let ((file (make-temp-file "gtasks-prev-marker" nil ".org"))
+        captured-query-args)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: a-id\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Foo\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-insert-task)
+                     (lambda (_token _list-id _data then _else query-args)
+                       (setq captured-query-args query-args)
+                       (funcall then '((id . "new") (updated . "u") (etag . "e"))))))
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "^\\*\\* TODO Foo")
+                (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L")))
+                  ;; Move point far away from Foo — onto A's heading.
+                  ;; Without the marker goto-char, the backward search
+                  ;; starts here and finds no preceding sibling of A,
+                  ;; so `previous' would be nil.
+                  (goto-char (point-min))
+                  (re-search-forward "^\\*\\* TODO A")
+                  (org-mode-google-tasks-sync-engine--push-new
+                   nil "L" task file))))))
+      (should (assoc "previous" captured-query-args))
+      (should (equal "a-id" (cdr (assoc "previous" captured-query-args))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
 ;;; -- sort resilience: #+ keywords before first heading ---------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/sort-children-does-not-error-with-keywords-before-first-heading ()
