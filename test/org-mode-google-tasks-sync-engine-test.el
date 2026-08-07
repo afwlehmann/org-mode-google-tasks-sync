@@ -463,8 +463,15 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
                            (updated . "2026-01-01T00:00:00.000Z"))))
             (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
                        (lambda (&rest _) t))
-                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
-                       (lambda (&rest _) t)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                       (lambda (_token _list-id _tasks _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                       (lambda (_token _list-id _pairs done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                       (lambda (_token _list-id _parent done)
+                         (funcall done))))
               (org-mode-google-tasks-sync-engine--apply
                nil "L" file "Tasks" 'full
                (list remote)
@@ -497,8 +504,9 @@ engine deletions are recoverable, but the code never snapshotted."
                     "   :END:\n"))
           (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
                      (lambda (&rest _) t))
-                    ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
-                     (lambda (&rest _) t)))
+                    ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                     (lambda (_token _list-id _tasks _file done)
+                       (funcall done))))
             (org-mode-google-tasks-sync-engine--apply
              nil "L" file "Tasks" 'full nil #'ignore)))
       (with-current-buffer (get-buffer-create
@@ -554,8 +562,15 @@ gated on `full' like the absent-id sweep)."
                            (updated . "2026-01-01T00:00:00.000Z")))))
             (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
                        (lambda (&rest _) t))
-                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
-                       (lambda (&rest _) t)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                       (lambda (_token _list-id _tasks _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                       (lambda (_token _list-id _pairs done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                       (lambda (_token _list-id _parent done)
+                         (funcall done))))
               (org-mode-google-tasks-sync-engine--apply
                nil "L" file "Tasks" 'incremental remote #'ignore))))
       (with-current-buffer (find-file-noselect file)
@@ -591,8 +606,15 @@ inserted — the hidden filter drops it before the pull pass."
                            (updated . "2026-01-01T00:00:00.000Z")))))
             (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
                        (lambda (&rest _) t))
-                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
-                       (lambda (&rest _) t)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                       (lambda (_token _list-id _tasks _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                       (lambda (_token _list-id _pairs done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                       (lambda (_token _list-id _parent done)
+                         (funcall done))))
               (org-mode-google-tasks-sync-engine--apply
                nil "L" file "Tasks" 'incremental remote #'ignore))))
       (with-current-buffer (find-file-noselect file)
@@ -1018,6 +1040,107 @@ happens to be in)."
         (kill-buffer))
       (delete-file file))))
 
+;;; -- reorder drift detection (B1) -------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/detect-reorder-drift-fires-moves ()
+  "`--detect-reorder-drift' returns move pairs when the buffer order
+differs from the position-sorted order.  This is the manual
+cut/paste path: the user moved a heading, the positions haven't
+changed, and the engine pushes the new order to the server."
+  (let ((file (make-temp-file "gtasks-drift" nil ".org"))
+        captured-moves)
+    (unwind-protect
+        (progn
+          ;; Buffer order: B (pos 2), A (pos 1) — user swapped them.
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO B\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-b\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000002\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-a\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (with-current-buffer (find-file-noselect file)
+            (let* ((parent-marker (save-excursion
+                                    (goto-char (point-min))
+                                    (re-search-forward "^\\* Tasks")
+                                    (point-marker)))
+                   (snapshot (org-mode-google-tasks-sync-engine--snapshot-sibling-order
+                              parent-marker))
+                   (drift (org-mode-google-tasks-sync-engine--detect-reorder-drift
+                           snapshot)))
+              (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                         (lambda (_token _list-id task-id then _else _parent previous-id)
+                           (push (cons task-id previous-id) captured-moves)
+                           (funcall then '((position . "00000000000000000003"))))))
+                (org-mode-google-tasks-sync-engine--resolve-reorder-drift
+                 nil "L" drift #'ignore)))))
+      ;; Buffer order is B, A.  Sorted order is A, B.  They differ, so
+      ;; every task gets a move with its buffer predecessor:
+      ;; B -> previous=nil (first), A -> previous=id-b (second).
+      ;; The mock uses push, so captured-moves is in reverse order:
+      ;; first element is the LAST move fired (A), second is the first (B).
+      (should (= 2 (length captured-moves)))
+      (should (equal "id-a" (caar captured-moves)))
+      (should (equal "id-b" (cdar captured-moves)))
+      (should (equal "id-b" (car (cadr captured-moves))))
+      (should (null (cdr (cadr captured-moves))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/detect-reorder-drift-noop-when-aligned ()
+  "`--detect-reorder-drift' returns nil when buffer order matches
+position-sorted order — no moves are fired."
+  (let ((file (make-temp-file "gtasks-no-drift" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-a\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO B\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-b\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000002\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (with-current-buffer (find-file-noselect file)
+            (let* ((parent-marker (save-excursion
+                                    (goto-char (point-min))
+                                    (re-search-forward "^\\* Tasks")
+                                    (point-marker)))
+                   (snapshot (org-mode-google-tasks-sync-engine--snapshot-sibling-order
+                              parent-marker))
+                   (drift (org-mode-google-tasks-sync-engine--detect-reorder-drift
+                           snapshot)))
+              (should (null drift)))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
 ;;; -- sort resilience: #+ keywords before first heading ---------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/sort-children-does-not-error-with-keywords-before-first-heading ()
@@ -1066,8 +1189,15 @@ stuck at `applying'."
                             (position . "00000000000000000002")))))
             (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
                        (lambda (&rest _) t))
-                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new)
-                       (lambda (&rest _) t)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                       (lambda (_token _list-id _tasks _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                       (lambda (_token _list-id _pairs done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                       (lambda (_token _list-id _parent done)
+                         (funcall done))))
               ;; Must not raise.
               (org-mode-google-tasks-sync-engine--apply
                nil "L" file "Tasks" 'full

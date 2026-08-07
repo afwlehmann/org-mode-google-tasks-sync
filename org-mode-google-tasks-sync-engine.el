@@ -365,24 +365,28 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
         (insert "#+GTASKS_LAST_SYNC: " ts "\n")))))
 
 (defun org-mode-google-tasks-sync-engine--finalize-apply
-    (token list-id parent-marker file done)
-  "Repair position ties, sort children, stamp last-sync, save, call DONE.
-TOKEN authenticates any tie-repair moves.  LIST-ID is the Google
-Tasks list.  PARENT-MARKER locates the subtree to sort.  FILE is the
-org source file.  DONE is called when all post-push work is finished.
-Runs after all push-new inserts have completed (their async callbacks
-have written GTASK_ID into the buffer), so `--sort-children' sees
-the full set of positions.  Tie repair runs before the sort so
-duplicate positions don't produce an unstable order."
-  (org-mode-google-tasks-sync-engine--repair-position-ties
-   token list-id parent-marker
+    (token list-id parent-marker file drift-pairs done)
+  "Resolve reorder drift, repair ties, sort, stamp, save, call DONE.
+TOKEN authenticates moves.  LIST-ID is the Google Tasks list.
+PARENT-MARKER locates the subtree.  FILE is the org source file.
+DRIFT-PAIRS is the list from `--detect-reorder-drift' (snapshot
+taken at tick start, before pulls rewrote positions).  DONE is
+called when all post-push work is finished.  Reorder drift is
+resolved first (pushing the user's manual reorder to the server),
+then tie repair, then sort — so the sort converges to the user's
+intended order."
+  (org-mode-google-tasks-sync-engine--resolve-reorder-drift
+   token list-id drift-pairs
    (lambda ()
-     (org-mode-google-tasks-sync-engine--sort-children parent-marker)
-     (org-mode-google-tasks-sync-engine--set-last-sync
-      file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
-     (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
-       (save-buffer))
-     (funcall done))))
+     (org-mode-google-tasks-sync-engine--repair-position-ties
+      token list-id parent-marker
+      (lambda ()
+        (org-mode-google-tasks-sync-engine--sort-children parent-marker)
+        (org-mode-google-tasks-sync-engine--set-last-sync
+         file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (save-buffer))
+        (funcall done))))))
 
 (defun org-mode-google-tasks-sync-engine--apply
     (token list-id file parent mode remote-tasks done)
@@ -423,7 +427,9 @@ only fires in `full' mode."
                                      remote-list)))
            (top-level (cl-remove-if (lambda (r) (alist-get 'parent r)) visible))
            (subtasks (cl-remove-if-not (lambda (r) (alist-get 'parent r)) visible))
-           (new-tasks nil))
+           (new-tasks nil)
+           (drift-snapshot (org-mode-google-tasks-sync-engine--snapshot-sibling-order
+                            parent-marker)))
       (dolist (l local)
         (when (org-mode-google-tasks-sync-org-task-id l)
           (puthash (org-mode-google-tasks-sync-org-task-id l) l local-by-id)))
@@ -466,7 +472,9 @@ only fires in `full' mode."
         token list-id (nreverse new-tasks) file
         (lambda ()
           (org-mode-google-tasks-sync-engine--finalize-apply
-           token list-id parent-marker file done))))))
+           token list-id parent-marker file
+           (org-mode-google-tasks-sync-engine--detect-reorder-drift drift-snapshot)
+           done))))))
 
 (defun org-mode-google-tasks-sync-engine--task-sort-key ()
   "Return the sort key for the current heading.
@@ -582,6 +590,93 @@ move.  Searches the current buffer for the heading by GTASK_ID."
               (org-back-to-heading t)
               (org-entry-put nil org-mode-google-tasks-sync-org--prop-position
                              position))))))))
+
+;;; -- reorder drift detection (B1) -------------------------------------------
+;;
+;; Detects manual cut/paste reorders by comparing the buffer's physical
+;; sibling order against the order implied by stored :GTASK_POSITION:
+;; values.  The snapshot is taken at tick START (before pulls rewrite
+;; position properties), so server-driven reorders (pulls) are not
+;; mistaken for user-driven ones.  After reconciliation, drifted tasks
+;; are pushed to the server via `tasks.move' with `previous=<buffer
+;; predecessor>', reconstructing the user's intended order server-side.
+
+(defun org-mode-google-tasks-sync-engine--snapshot-sibling-order (parent-marker)
+  "Return (BUFFER-IDS . SORTED-IDS) for synced children of PARENT-MARKER.
+BUFFER-IDS is the list of GTASK_IDs in physical buffer order.
+SORTED-IDS is the same list stably sorted by :GTASK_POSITION:.
+When the two lists differ, a manual reorder has occurred.
+Returns (nil . nil) when PARENT-MARKER is invalid."
+  (if (not (and parent-marker (marker-buffer parent-marker)))
+      (cons nil nil)
+    (with-current-buffer (marker-buffer parent-marker)
+      (save-excursion
+        (goto-char parent-marker)
+        (org-back-to-heading t)
+        (let ((parent-level (org-current-level))
+              (entries nil))
+          (when (org-goto-first-child)
+            (while (and (not (eobp))
+                        (= (org-current-level) (1+ parent-level)))
+              (let ((id (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))
+                    (pos (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))
+                (when id
+                  (push (cons id (or pos "")) entries)))
+              (unless (org-get-next-sibling)
+                (goto-char (point-max)))))
+          (let* ((rev (reverse entries))
+                 (buffer-ids (mapcar #'car rev))
+                 (sorted-ids (mapcar #'car
+                                     (sort (copy-sequence rev)
+                                           (lambda (a b)
+                                             (string< (cdr a) (cdr b)))))))
+            (cons buffer-ids sorted-ids)))))))
+
+(defun org-mode-google-tasks-sync-engine--detect-reorder-drift (snapshot)
+  "Return a list of (ID . PREV-ID) move pairs for drifted siblings.
+SNAPSHOT is the (BUFFER-IDS . SORTED-IDS) from
+`--snapshot-sibling-order'.  When the two lists are equal (no
+drift), returns nil.  When they differ, returns a pair for every
+task in buffer order whose actual buffer predecessor differs from
+what the sorted order would place before it.
+Each pair is (ID . PREV-ID) where PREV-ID is the synced sibling
+immediately before ID in buffer order (nil for the first sibling)."
+  (let ((buffer-ids (car snapshot))
+        (sorted-ids (cdr snapshot)))
+    (if (equal buffer-ids sorted-ids)
+        nil
+      (let ((pairs nil)
+            (prev-id nil))
+        (dolist (id buffer-ids)
+          (push (cons id prev-id) pairs)
+          (setq prev-id id))
+        (nreverse pairs)))))
+
+(defun org-mode-google-tasks-sync-engine--resolve-reorder-drift
+    (token list-id drift-pairs done)
+  "Fire `tasks.move' for each pair in DRIFT-PAIRS, serially.
+TOKEN authenticates.  LIST-ID is the Google Tasks list.  DONE is
+called when all moves complete (or immediately when no drift).
+Each pair is (ID . PREV-ID); the move sets `previous=PREV-ID' so
+Google places ID right after PREV-ID, reconstructing the buffer
+order on the server."
+  (if (null drift-pairs)
+      (funcall done)
+    (let* ((pair (car drift-pairs))
+           (task-id (car pair))
+           (prev-id (cdr pair)))
+      (org-mode-google-tasks-sync-api-move-task
+       token list-id task-id
+       (lambda (resp)
+         (org-mode-google-tasks-sync-engine--write-move-result task-id resp)
+         (org-mode-google-tasks-sync-engine--resolve-reorder-drift
+          token list-id (cdr drift-pairs) done))
+       (lambda (err)
+         (org-mode-google-tasks-sync-engine--log
+          "Reorder drift move error: %S (task=%s)" err task-id)
+         (org-mode-google-tasks-sync-engine--resolve-reorder-drift
+          token list-id (cdr drift-pairs) done))
+       nil prev-id))))
 
 (defun org-mode-google-tasks-sync-engine--back-to-heading-safe ()
   "Move point to the nearest heading, never raising a user-error.
