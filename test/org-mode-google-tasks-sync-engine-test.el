@@ -926,6 +926,98 @@ prior task's ID in the buffer."
        nil "L" nil "/dev/null" (lambda () (setq called-done t))))
     (should called-done)))
 
+;;; -- position-tie repair -----------------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/repair-ties-fires-move-for-duplicates ()
+  "`--repair-position-ties' fires `tasks.move' with `previous=<first-id>'
+for the second of two adjacent siblings that share the same
+:GTASK_POSITION: string.  Without this, the stable sort produces
+an unstable order (ties preserved in whatever order the buffer
+happens to be in)."
+  (let ((file (make-temp-file "gtasks-tie-repair" nil ".org"))
+        captured-moves)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-a\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO B\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-b\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                     (lambda (_token _list-id task-id then _else new-parent previous-id)
+                       (push (cons task-id previous-id) captured-moves)
+                       (funcall then '((position . "00000000000000000001"))))))
+            (with-current-buffer (find-file-noselect file)
+              (let ((parent-marker (save-excursion
+                                      (goto-char (point-min))
+                                      (re-search-forward "^\\* Tasks")
+                                      (point-marker))))
+                (org-mode-google-tasks-sync-engine--repair-position-ties
+                 nil "L" parent-marker #'ignore)))))
+      (should (= 1 (length captured-moves)))
+      (should (equal "id-b" (caar captured-moves)))
+      (should (equal "id-a" (cdar captured-moves)))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/repair-ties-noop-when-unique ()
+  "`--repair-position-ties' fires no moves when all positions are unique."
+  (let ((file (make-temp-file "gtasks-tie-unique" nil ".org"))
+        (move-count 0))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO A\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-a\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO B\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-b\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000002\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                     (lambda (&rest _)
+                       (setq move-count (1+ move-count))
+                       (error "should not be called"))))
+            (with-current-buffer (find-file-noselect file)
+              (let ((parent-marker (save-excursion
+                                      (goto-char (point-min))
+                                      (re-search-forward "^\\* Tasks")
+                                      (point-marker))))
+                (org-mode-google-tasks-sync-engine--repair-position-ties
+                 nil "L" parent-marker #'ignore)))))
+      (should (eq 0 move-count))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
 ;;; -- sort resilience: #+ keywords before first heading ---------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/sort-children-does-not-error-with-keywords-before-first-heading ()

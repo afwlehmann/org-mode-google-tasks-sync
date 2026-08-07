@@ -364,19 +364,25 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
           (replace-match (concat "#+GTASKS_LAST_SYNC: " ts))
         (insert "#+GTASKS_LAST_SYNC: " ts "\n")))))
 
-(defun org-mode-google-tasks-sync-engine--finalize-apply (parent-marker file done)
-  "Sort children, stamp the last-sync keyword, save, and call DONE.
-PARENT-MARKER locates the subtree to sort.  FILE is the org source
-file.  DONE is called when all post-push work is finished.
-Runs after all push-new inserts have completed (their async
-callbacks have written GTASK_ID into the buffer), so
-`--sort-children' sees the full set of positions."
-  (org-mode-google-tasks-sync-engine--sort-children parent-marker)
-  (org-mode-google-tasks-sync-engine--set-last-sync
-   file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
-  (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
-    (save-buffer))
-  (funcall done))
+(defun org-mode-google-tasks-sync-engine--finalize-apply
+    (token list-id parent-marker file done)
+  "Repair position ties, sort children, stamp last-sync, save, call DONE.
+TOKEN authenticates any tie-repair moves.  LIST-ID is the Google
+Tasks list.  PARENT-MARKER locates the subtree to sort.  FILE is the
+org source file.  DONE is called when all post-push work is finished.
+Runs after all push-new inserts have completed (their async callbacks
+have written GTASK_ID into the buffer), so `--sort-children' sees
+the full set of positions.  Tie repair runs before the sort so
+duplicate positions don't produce an unstable order."
+  (org-mode-google-tasks-sync-engine--repair-position-ties
+   token list-id parent-marker
+   (lambda ()
+     (org-mode-google-tasks-sync-engine--sort-children parent-marker)
+     (org-mode-google-tasks-sync-engine--set-last-sync
+      file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
+     (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+       (save-buffer))
+     (funcall done))))
 
 (defun org-mode-google-tasks-sync-engine--apply
     (token list-id file parent mode remote-tasks done)
@@ -460,7 +466,7 @@ only fires in `full' mode."
         token list-id (nreverse new-tasks) file
         (lambda ()
           (org-mode-google-tasks-sync-engine--finalize-apply
-           parent-marker file done))))))
+           token list-id parent-marker file done))))))
 
 (defun org-mode-google-tasks-sync-engine--task-sort-key ()
   "Return the sort key for the current heading.
@@ -493,6 +499,89 @@ nil or points at no heading."
         (goto-char parent-marker)
         (when (org-at-heading-p)
           (org-mode-google-tasks-sync-engine--sort-subtree-at-point))))))
+
+(defun org-mode-google-tasks-sync-engine--collect-tie-pairs (parent-marker)
+  "Return (ID . PREV-ID) pairs for synced siblings with duplicate positions.
+Walks direct synced children of PARENT-MARKER in buffer order.  When
+two adjacent siblings share the same :GTASK_POSITION:, the second
+one needs a `tasks.move' with `previous=<first-id>' to get a unique
+position.  Returns nil when all positions are unique."
+  (when (and parent-marker (marker-buffer parent-marker))
+    (with-current-buffer (marker-buffer parent-marker)
+      (save-excursion
+        (goto-char parent-marker)
+        (org-back-to-heading t)
+        (let ((parent-level (org-current-level))
+              (pairs nil)
+              (prev-id nil)
+              (prev-pos nil))
+          (when (org-goto-first-child)
+            (while (and (not (eobp))
+                        (= (org-current-level) (1+ parent-level)))
+              (let ((id (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))
+                    (pos (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))
+                (when (and id pos prev-id prev-pos (equal pos prev-pos))
+                  (push (cons id prev-id) pairs))
+                (setq prev-id id
+                      prev-pos pos))
+              (unless (org-get-next-sibling)
+                (goto-char (point-max)))))
+          (nreverse pairs))))))
+
+(defun org-mode-google-tasks-sync-engine--repair-position-ties
+    (token list-id parent-marker done)
+  "Fire `tasks.move' for siblings with duplicate :GTASK_POSITION: values.
+TOKEN authenticates the calls.  LIST-ID is the Google Tasks list.
+PARENT-MARKER locates the subtree.  DONE is called when all tie
+repairs have completed (or immediately when there are no ties).
+Each move response writes the fresh position into the heading's
+property, ensuring the subsequent `--sort-children' produces a
+stable order."
+  (let ((pairs (org-mode-google-tasks-sync-engine--collect-tie-pairs parent-marker)))
+    (if (null pairs)
+        (funcall done)
+      (org-mode-google-tasks-sync-engine--repair-tie-queue
+       token list-id pairs done))))
+
+(defun org-mode-google-tasks-sync-engine--repair-tie-queue
+    (token list-id pairs done)
+  "Process PAIRS serially, calling DONE when the queue is empty.
+TOKEN authenticates each move.  LIST-ID is the Google Tasks list.
+Each pair is (ID . PREV-ID); `tasks.move' is called with
+`previous=PREV-ID' to give ID a unique position after PREV-ID."
+  (if (null pairs)
+      (funcall done)
+    (let* ((pair (car pairs))
+           (task-id (car pair))
+           (prev-id (cdr pair)))
+      (org-mode-google-tasks-sync-api-move-task
+       token list-id task-id
+       (lambda (resp)
+         (org-mode-google-tasks-sync-engine--write-move-result task-id resp)
+         (org-mode-google-tasks-sync-engine--repair-tie-queue
+          token list-id (cdr pairs) done))
+       (lambda (err)
+         (org-mode-google-tasks-sync-engine--log
+          "Tie repair move error: %S (task=%s)" err task-id)
+         (org-mode-google-tasks-sync-engine--repair-tie-queue
+          token list-id (cdr pairs) done))
+       nil prev-id))))
+
+(defun org-mode-google-tasks-sync-engine--write-move-result (task-id resp)
+  "Write the position from a move RESP into the heading with :GTASK_ID: TASK-ID.
+Called after `tasks.move' returns a fresh position for a tie-repair
+move.  Searches the current buffer for the heading by GTASK_ID."
+  (let ((position (alist-get 'position resp)))
+    (when position
+      (let ((marker (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
+                     (buffer-file-name) task-id)))
+        (when (and marker (marker-buffer marker))
+          (with-current-buffer (marker-buffer marker)
+            (save-excursion
+              (goto-char marker)
+              (org-back-to-heading t)
+              (org-entry-put nil org-mode-google-tasks-sync-org--prop-position
+                             position))))))))
 
 (defun org-mode-google-tasks-sync-engine--back-to-heading-safe ()
   "Move point to the nearest heading, never raising a user-error.
