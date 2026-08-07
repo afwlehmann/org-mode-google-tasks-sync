@@ -316,6 +316,85 @@ Old body.
     (should (re-search-forward "New body" nil t))
     (should-not (re-search-forward "Old body" nil t))))
 
+(ert-deftest org-mode-google-tasks-sync-org-test/headline-body-excludes-child-headings ()
+  "`--headline-body' must not include child heading text in the
+parent's notes.  Org's `:contents-end' spans the entire subtree;
+without clamping at the first child, subtask headings leak into
+the parent's notes slot, causing the canonical hash to flap on
+every subtask change and the push callback to re-insert them as
+new headings (geometric duplication per sync).  Regression for the
+root cause of the subtask-doubling bug."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* TODO Parent
+SCHEDULED: <2026-08-07 Fri>
+:PROPERTIES:
+:GTASK_ID: parent-id
+:END:
+Parent body line.
+Second body line.
+
+** TODO Subtask A
+   :PROPERTIES:
+   :GTASK_ID: sub-a
+   :END:
+** TODO Subtask B
+   :PROPERTIES:
+   :GTASK_ID: sub-b
+   :END:
+"
+    (re-search-forward "^\\*+ ")
+    (let* ((element (org-element-at-point))
+           (notes (org-mode-google-tasks-sync-org--headline-body element)))
+      (should (equal "Parent body line.\nSecond body line." notes))
+      (should-not (string-match-p "Subtask A" notes))
+      (should-not (string-match-p "Subtask B" notes))
+      (should-not (string-match-p "sub-a" notes))
+      (should-not (string-match-p "sub-b" notes)))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/headline-body-empty-when-only-children ()
+  "`--headline-body' returns an empty string when the parent has no
+body text but does have child headings.  The clamp at the first
+child must still work when there is no body between the property
+drawer and the first child."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* TODO Parent
+:PROPERTIES:
+:GTASK_ID: parent-id
+:END:
+** TODO Subtask A
+   :PROPERTIES:
+   :GTASK_ID: sub-a
+   :END:
+"
+    (re-search-forward "^\\*+ ")
+    (let* ((element (org-element-at-point))
+           (notes (org-mode-google-tasks-sync-org--headline-body element)))
+      (should (equal "" notes)))))
+
+(ert-deftest org-mode-google-tasks-sync-org-test/read-task-notes-exclude-children ()
+  "`read-task-at-point' on a parent heading must not include child
+heading text in the struct's notes slot.  Integration test for the
+`--headline-body' clamp through the full read path."
+  (org-mode-google-tasks-sync-org-test--with-org
+      "* TODO Parent
+SCHEDULED: <2026-08-07 Fri>
+:PROPERTIES:
+:GTASK_ID: parent-id
+:END:
+Some notes here.
+
+** TODO Child
+   :PROPERTIES:
+   :GTASK_ID: child-id
+   :END:
+"
+    (re-search-forward "^\\*+ ")
+    (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L1")))
+      (should (equal "Some notes here."
+                     (org-mode-google-tasks-sync-org-task-notes task)))
+      (should-not (string-match-p "Child"
+                                  (org-mode-google-tasks-sync-org-task-notes task))))))
+
 (ert-deftest org-mode-google-tasks-sync-org-test/read-task-marker-is-sticky ()
   "Task struct markers use insertion-type t so they ride with the
 heading across org's delete+insert operations (e.g. `org-sort-entries').

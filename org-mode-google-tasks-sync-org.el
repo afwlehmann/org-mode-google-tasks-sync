@@ -148,11 +148,23 @@ if a done keyword."
 
 (defun org-mode-google-tasks-sync-org--headline-body (element)
   "Return the body text of headline ELEMENT, excluding the property drawer.
-Trimmed; runs of blank lines collapsed."
+Trimmed; runs of blank lines collapsed.  Clamps at the first child
+heading so child heading text never leaks into the parent's notes
+slot — mirrors the symmetric clamp in `--replace-body'.  Without
+this, `:contents-end' (which spans the entire subtree) would pull
+subtask headings into the parent's notes, causing the canonical hash
+to flap on every subtask change and the push callback to re-insert
+them as new headings (geometric duplication per sync)."
   (let* ((begin (org-element-property :contents-begin element))
          (end   (org-element-property :contents-end element)))
     (if (and begin end)
-        (let ((raw (buffer-substring-no-properties begin end)))
+        (let* ((clamped-end
+                (save-excursion
+                  (goto-char begin)
+                  (if (re-search-forward "^\\*+ " end t)
+                      (line-beginning-position)
+                    end)))
+               (raw (buffer-substring-no-properties begin clamped-end)))
           (org-mode-google-tasks-sync-org--canonicalize-body raw))
       "")))
 
