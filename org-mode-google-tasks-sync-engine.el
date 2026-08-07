@@ -364,6 +364,20 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
           (replace-match (concat "#+GTASKS_LAST_SYNC: " ts))
         (insert "#+GTASKS_LAST_SYNC: " ts "\n")))))
 
+(defun org-mode-google-tasks-sync-engine--finalize-apply (parent-marker file done)
+  "Sort children, stamp the last-sync keyword, save, and call DONE.
+PARENT-MARKER locates the subtree to sort.  FILE is the org source
+file.  DONE is called when all post-push work is finished.
+Runs after all push-new inserts have completed (their async
+callbacks have written GTASK_ID into the buffer), so
+`--sort-children' sees the full set of positions."
+  (org-mode-google-tasks-sync-engine--sort-children parent-marker)
+  (org-mode-google-tasks-sync-engine--set-last-sync
+   file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
+  (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+    (save-buffer))
+  (funcall done))
+
 (defun org-mode-google-tasks-sync-engine--apply
     (token list-id file parent mode remote-tasks done)
   "Reconcile REMOTE-TASKS against the local subtree under PARENT in FILE.
@@ -402,7 +416,8 @@ only fires in `full' mode."
                                                    (alist-get 'id r)))
                                      remote-list)))
            (top-level (cl-remove-if (lambda (r) (alist-get 'parent r)) visible))
-           (subtasks (cl-remove-if-not (lambda (r) (alist-get 'parent r)) visible)))
+           (subtasks (cl-remove-if-not (lambda (r) (alist-get 'parent r)) visible))
+           (new-tasks nil))
       (dolist (l local)
         (when (org-mode-google-tasks-sync-org-task-id l)
           (puthash (org-mode-google-tasks-sync-org-task-id l) l local-by-id)))
@@ -437,13 +452,15 @@ only fires in `full' mode."
          local-by-id))
       (dolist (l local)
         (unless (org-mode-google-tasks-sync-org-task-id l)
-          (org-mode-google-tasks-sync-engine--push-new token list-id l file)))
-      (org-mode-google-tasks-sync-engine--sort-children parent-marker)
-      (org-mode-google-tasks-sync-engine--set-last-sync
-       file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
-      (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
-        (save-buffer))))
-  (funcall done))
+          (push l new-tasks))
+        (org-mode-google-tasks-sync-engine--log-debug
+         "Queued new task for push: %s"
+         (org-mode-google-tasks-sync-org-task-title l)))
+       (org-mode-google-tasks-sync-engine--push-new-queue
+        token list-id (nreverse new-tasks) file
+        (lambda ()
+          (org-mode-google-tasks-sync-engine--finalize-apply
+           parent-marker file done))))))
 
 (defun org-mode-google-tasks-sync-engine--task-sort-key ()
   "Return the sort key for the current heading.
@@ -879,7 +896,8 @@ when the write ran."
       (org-mode-google-tasks-sync-org-write-task task)
       t)))
 
-(defun org-mode-google-tasks-sync-engine--push-new (token list-id task &optional file)
+(defun org-mode-google-tasks-sync-engine--push-new
+    (token list-id task &optional file on-success)
   "POST a new TASK to Google in LIST-ID using TOKEN.
 When FILE is given and TASK has a `parent-id', pass it as the `parent'
 query param to `tasks.insert' so Google knows the nesting.  Also
@@ -887,8 +905,12 @@ passes `previous' (the :GTASK_ID: of the nearest preceding synced
 sibling) so Google appends the task after it — matching the local
 buffer order.  Without `previous', Google inserts new tasks at the
 top of the list, and the next tick's `--sort-children' would pull
-the task away from where the user placed it."
-  (let* ((parent-id (org-mode-google-tasks-sync-org-task-parent-id task))
+the task away from where the user placed it.
+
+When ON-SUCCESS is non-nil it is called with the response alist
+after the local heading has been updated — used by the serialized
+push queue to fire the next pending insert."
+  (let* ((parent-id (org-mode-google-tasks-sync-engine--resolve-parent-id task))
          (previous-id (when file
                         (org-mode-google-tasks-sync-engine--prev-synced-sibling-id task)))
          (insert-args
@@ -899,18 +921,59 @@ the task away from where the user placed it."
      token list-id
      (org-mode-google-tasks-sync-engine--task->api-data task)
      (lambda (resp)
-       (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
-       (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
-       (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
-        (when (org-mode-google-tasks-sync-org-task-marker task)
-          (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task))
-       (org-mode-google-tasks-sync-engine--log "Pushed new: %s"
-                                          (org-mode-google-tasks-sync-org-task-title task)))
+       (org-mode-google-tasks-sync-engine--finalize-push-new task resp)
+       (when on-success (funcall on-success resp)))
      (lambda (err)
        (org-mode-google-tasks-sync-engine--log "Insert error: %S (task=%s)"
-                                         err
-                                         (org-mode-google-tasks-sync-org-task-title task)))
+                                          err
+                                          (org-mode-google-tasks-sync-org-task-title task)))
      insert-args)))
+
+(defun org-mode-google-tasks-sync-engine--resolve-parent-id (task)
+  "Return TASK's parent-id, re-read from the buffer at fire time.
+When the struct's `parent-id' is already set (parent was synced
+before collection), use it.  Otherwise, look up the parent heading's
+:GTASK_ID: from the buffer — this catches the case where the parent
+was itself a new task pushed earlier in the same tick (its GTASK_ID
+was written by the async callback between collect-time and now).
+Returns nil for top-level tasks."
+  (or (org-mode-google-tasks-sync-org-task-parent-id task)
+      (let ((m (org-mode-google-tasks-sync-org-task-marker task)))
+        (when (and m (marker-buffer m))
+          (with-current-buffer (marker-buffer m)
+            (save-excursion
+              (goto-char m)
+              (org-mode-google-tasks-sync-org--parent-id-at-point)))))))
+
+(defun org-mode-google-tasks-sync-engine--finalize-push-new (task resp)
+  "Write the server-assigned fields from RESP into TASK and its heading.
+Updates the struct's id, updated, and etag slots, then writes the
+full task to the buffer via `--write-task-if-marker-matches'."
+  (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
+  (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
+  (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
+  (when (org-mode-google-tasks-sync-org-task-marker task)
+    (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task))
+  (org-mode-google-tasks-sync-engine--log "Pushed new: %s"
+                                     (org-mode-google-tasks-sync-org-task-title task)))
+
+(defun org-mode-google-tasks-sync-engine--push-new-queue
+    (token list-id tasks file done)
+  "Push TASKS to Google serially, firing DONE when the queue is empty.
+TOKEN authenticates each insert.  LIST-ID is the Google Tasks list.
+Each task is pushed via `--push-new'; the next task fires only after
+the previous insert's :then callback completes and writes the
+GTASK_ID into the buffer.  This ensures children of a newly-pushed
+parent see the parent's GTASK_ID when `--resolve-parent-id' reads
+the buffer, and that `previous' reflects the just-written sibling.
+FILE is the source org file.  DONE is called when the queue drains."
+  (if (null tasks)
+      (funcall done)
+    (org-mode-google-tasks-sync-engine--push-new
+     token list-id (car tasks) file
+     (lambda (_resp)
+       (org-mode-google-tasks-sync-engine--push-new-queue
+        token list-id (cdr tasks) file done)))))
 
 (defun org-mode-google-tasks-sync-engine--prev-synced-sibling-id (task)
   "Return the :GTASK_ID: of the nearest preceding synced sibling of TASK.

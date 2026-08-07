@@ -838,6 +838,94 @@ wrong sibling's ID when called from `--push-new' during `--apply'
         (kill-buffer))
       (delete-file file))))
 
+;;; -- push-new serialization: parent-id resolved at fire time -----------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/resolve-parent-id-reads-from-buffer ()
+  "`--resolve-parent-id' re-reads the parent heading's :GTASK_ID:
+from the buffer at fire time, not from the struct's `parent-id'
+slot.  When the parent was itself a new task pushed moments earlier
+in the same tick (its GTASK_ID written by the async callback), the
+struct's slot is nil but the buffer has the value.  This is the
+core fix for children of unsynced parents being pushed as top-level."
+  (let ((file (make-temp-file "gtasks-resolve-parent" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Parent\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: parent-fresh-id\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "*** TODO Child\n"))
+          (with-current-buffer (find-file-noselect file)
+            (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\*\\* TODO Child")
+              (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L")))
+                ;; parent-id slot is nil (parent had no GTASK_ID at
+                ;; collect time — simulate by clearing it).
+                (setf (org-mode-google-tasks-sync-org-task-parent-id task) nil)
+                (should (equal "parent-fresh-id"
+                               (org-mode-google-tasks-sync-engine--resolve-parent-id task)))))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/push-new-queue-serializes-inserts ()
+  "`--push-new-queue' pushes tasks one at a time, each waiting for
+the previous insert's :then to complete.  This ensures the
+`previous' param for task N+1 reflects task N's freshly-written
+GTASK_ID, not a stale nil.  The test verifies serialization by
+capturing insert call order and confirming each call sees the
+prior task's ID in the buffer."
+  (let ((file (make-temp-file "gtasks-push-queue" nil ".org"))
+        insert-order)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO First\n"
+                    "** TODO Second\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-insert-task)
+                     (lambda (_token _list-id _data then _else query-args)
+                       (let ((prev (cdr (assoc "previous" query-args))))
+                         (push prev insert-order)
+                         (funcall then '((id . "gen-id")
+                                         (updated . "u")
+                                         (etag . "e")))))))
+            (with-current-buffer (find-file-noselect file)
+              (let (tasks)
+                (save-excursion
+                  (goto-char (point-min))
+                  (re-search-forward "^\\*\\* TODO First")
+                  (push (org-mode-google-tasks-sync-org-read-task-at-point "L") tasks)
+                  (re-search-forward "^\\*\\* TODO Second")
+                  (push (org-mode-google-tasks-sync-org-read-task-at-point "L") tasks))
+                (org-mode-google-tasks-sync-engine--push-new-queue
+                 nil "L" (nreverse tasks) file #'ignore)))))
+      ;; First insert has no previous; second has "gen-id" (written
+      ;; by the first insert's :then callback).
+      (should (equal '(nil "gen-id") (nreverse insert-order)))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/push-new-queue-empty-calls-done ()
+  "An empty queue immediately calls DONE without firing any inserts."
+  (let ((called-done nil))
+    (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-insert-task)
+               (lambda (&rest _) (error "Should not be called"))))
+      (org-mode-google-tasks-sync-engine--push-new-queue
+       nil "L" nil "/dev/null" (lambda () (setq called-done t))))
+    (should called-done)))
+
 ;;; -- sort resilience: #+ keywords before first heading ---------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/sort-children-does-not-error-with-keywords-before-first-heading ()
