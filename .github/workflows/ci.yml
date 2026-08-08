@@ -255,6 +255,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Delete existing release (if any)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes || true
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -263,3 +271,4 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+          make_latest: true
