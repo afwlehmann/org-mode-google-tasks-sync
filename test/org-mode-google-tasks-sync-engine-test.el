@@ -432,6 +432,24 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
                (list t "" "2026-06-27T08:00:00Z")
                (list t "" "2026-06-27T12:00:00Z"))))
 
+(ert-deftest org-mode-google-tasks-sync-engine-test/compare-tasks-missing-position-sorts-last ()
+  "A TODO with an empty position string sorts AFTER a TODO with a real
+position.  This prevents positionless headings (e.g. a freshly-pushed
+task whose position write was skipped) from jumping to the front of
+the sibling list."
+  ;; "" vs "01" → "" is last → a should NOT come before b
+  (should-not (org-mode-google-tasks-sync-engine--compare-tasks
+               (list nil "" "")
+               (list nil "01" "")))
+  ;; "01" vs "" → "01" is first → a should come before b
+  (should (org-mode-google-tasks-sync-engine--compare-tasks
+           (list nil "01" "")
+           (list nil "" "")))
+  ;; "" vs "" → equal → string< returns nil → stable
+  (should-not (org-mode-google-tasks-sync-engine--compare-tasks
+               (list nil "" "")
+               (list nil "" ""))))
+
 ;;; -- Full-sync deletion sweep ------------------------------------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/sweep-deletes-absent-ids ()
@@ -918,6 +936,45 @@ tick's sort pulls the task away from its intended place."
         (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
           (set-buffer-modified-p nil))
         (kill-buffer))
+      (delete-file file))))
+
+;;; -- finalize-push-new copies position from response -------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/finalize-push-new-copies-position-from-response ()
+  "`--finalize-push-new' must copy `position' from the insert response
+into the struct so that `org-write-task' stamps :GTASK_POSITION: on
+the heading.  Without this, `--sort-children' sees an empty position
+and sorts the freshly-pushed heading to the front — the user
+perceives it as having disappeared."
+  (let ((file (make-temp-file "gtasks-push-pos" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n** TODO Foo\n"))
+          (with-current-buffer (find-file-noselect file)
+            (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\* ")
+              (let ((task (org-mode-google-tasks-sync-org-read-task-at-point "L")))
+                (org-mode-google-tasks-sync-engine--finalize-push-new
+                 task
+                 '((id . "new-id")
+                   (updated . "2026-08-08T05:51:37.661Z")
+                   (etag . "\"abc\"")
+                   (position . "00000000000000000004")))
+                ;; Struct should have the position from the response.
+                (should (equal "00000000000000000004"
+                               (org-mode-google-tasks-sync-org-task-position task)))
+                ;; Heading should have GTASK_POSITION written.
+                (should (equal "00000000000000000004"
+                               (org-entry-get nil "GTASK_POSITION")))
+                ;; And the ID too.
+                (should (equal "new-id"
+                               (org-entry-get nil "GTASK_ID"))))))
+          (with-current-buffer (find-file-noselect file)
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
       (delete-file file))))
 
 ;;; -- --prev-synced-sibling-id positions on the task's marker -----------------

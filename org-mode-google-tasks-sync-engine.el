@@ -526,12 +526,21 @@ Tuple: (done? position-string completed-string).  Used together with
 (defun org-mode-google-tasks-sync-engine--compare-tasks (a b)
   "Compare two `--task-sort-key' tuples A and B.
 TODOs come before DONEs; among TODOs, position ascending; among DONEs,
-completed timestamp descending (newest first)."
+completed timestamp descending (newest first).  A missing position
+\(empty string) sorts last among TODOs so that positionless headings
+\(e.g. a freshly-pushed task whose position write was skipped) stay
+at the end of the sibling list rather than jumping to the front."
   (cond
    ((and (not (nth 0 a)) (nth 0 b)) t)
    ((and (nth 0 a) (not (nth 0 b))) nil)
    ((nth 0 a) (string> (nth 2 a) (nth 2 b)))
-   (t         (string< (nth 1 a) (nth 1 b)))))
+   (t
+    (let ((pa (nth 1 a))
+          (pb (nth 1 b)))
+      (cond
+       ((and (string= pa "") (not (string= pb ""))) nil)
+       ((and (not (string= pa "")) (string= pb "")) t)
+       (t (string< pa pb)))))))
 
 (defun org-mode-google-tasks-sync-engine--sort-children (parent-marker)
   "Sort children of PARENT-MARKER by `--task-sort-key' / `--compare-tasks'.
@@ -1246,11 +1255,24 @@ Returns nil for top-level tasks."
 
 (defun org-mode-google-tasks-sync-engine--finalize-push-new (task resp)
   "Write the server-assigned fields from RESP into TASK and its heading.
-Updates the struct's id, updated, and etag slots, then writes the
-full task to the buffer via `--write-task-if-marker-matches'."
-  (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
-  (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
-  (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
+Updates the struct's id, updated, etag, position, completed, links,
+and web-view-link slots, then writes the full task to the buffer via
+`--write-task-if-marker-matches'.  Copying `position' from the
+response is essential: without it, `--sort-children' sees an empty
+position string and sorts the freshly-pushed heading to the front
+of its siblings — the user perceives the heading as having
+disappeared."
+  (let ((links-raw (alist-get 'links resp)))
+    (setf (org-mode-google-tasks-sync-org-task-id task) (alist-get 'id resp))
+    (setf (org-mode-google-tasks-sync-org-task-updated task) (alist-get 'updated resp))
+    (setf (org-mode-google-tasks-sync-org-task-etag task) (alist-get 'etag resp))
+    (setf (org-mode-google-tasks-sync-org-task-position task) (alist-get 'position resp))
+    (setf (org-mode-google-tasks-sync-org-task-completed task) (alist-get 'completed resp))
+    (setf (org-mode-google-tasks-sync-org-task-links task)
+          (when links-raw
+            (json-serialize links-raw :null-object nil :false-object :false)))
+    (setf (org-mode-google-tasks-sync-org-task-web-view-link task)
+          (alist-get 'webViewLink resp)))
   (when (org-mode-google-tasks-sync-org-task-marker task)
     (org-mode-google-tasks-sync-engine--write-task-if-marker-matches task))
   (org-mode-google-tasks-sync-engine--log "Pushed new: %s"

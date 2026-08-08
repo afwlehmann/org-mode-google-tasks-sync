@@ -302,7 +302,7 @@ After each sync the children of the parent heading are sorted to match Google's 
 - **TODO entries first**, by Google's `position` field (ascending — the lexicographic-rank string the API maintains for in-list ordering).
 - **DONE entries after**, by `completed` timestamp (descending — most-recently-completed first).
 
-`:GTASK_POSITION:` and `:GTASK_COMPLETED:` are stored on each synced heading.  Headings you create manually under the parent (no position yet) sort to the top of the TODO section until the next sync POSTs them and Google assigns a position.
+`:GTASK_POSITION:` and `:GTASK_COMPLETED:` are stored on each synced heading.  Headings you create manually under the parent are pushed on the next sync; Google assigns a `position`, which is written to the property drawer before the sort runs — so the heading lands in its server-assigned position on the same tick.  If a position is ever missing (e.g. a push error), the heading sorts to the end of the TODO section rather than the front.
 
 ### Reorder and reparent with org's own keys
 
@@ -440,6 +440,18 @@ Upgrading to 0.5.5 fixes the root cause and the next sync
 deduplicates any existing copies automatically (duplicates at any
 level — top-level tasks and subtasks — are removed and snapshotted to
 the trash buffer for manual recovery if needed).
+
+### Freshly-pushed subtasks sorting to the wrong position
+
+Versions before 0.5.6 had a bug where `--finalize-push-new` discarded
+the server-assigned `position` from the `tasks.insert` response — only
+`id`, `updated`, and `etag` were copied. The heading got its
+`:GTASK_ID:` but no `:GTASK_POSITION:`, so `--sort-children` sorted it
+to the front of its siblings (empty string sorts before any real
+position), making it appear to "disappear." On the next sync a pull
+would eventually write the position and the heading would "reappear."
+Upgrading to 0.5.6 fixes the root cause; existing positionless headings
+are repaired on the next pull.
 
 ---
 
