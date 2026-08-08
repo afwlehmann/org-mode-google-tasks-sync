@@ -7,7 +7,7 @@
 
 trivialBuild {
   pname = "org-mode-google-tasks-sync";
-  version = "0.5.5";
+  version = "0.5.6";
   src = ../.;
   packageRequires = [
     plz
