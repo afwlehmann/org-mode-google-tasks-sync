@@ -66,3 +66,18 @@ After visiting https://myaccount.google.com/permissions and removing the
 app, the next tick will fail authenticating.  Re-run `M-x
 org-mode-google-tasks-sync-authorize` (or the `bootstrap` helper if you're
 declaratively-managed) to mint a fresh token.
+
+## Freshly-pushed subtask appears to disappear
+
+If a heading you added under a synced parent seems to vanish after the
+first sync and reappear on the next, check its `:PROPERTIES:` drawer
+for a `:GTASK_POSITION:` line.  Versions before 0.5.6 discarded the
+server-assigned `position` from the `tasks.insert` response, so the
+heading got its `:GTASK_ID:` but no `:GTASK_POSITION:`.  The post-apply
+sort then moved it to the front of its siblings (empty string sorts
+before any real position), making it look like it had disappeared.  On
+the next sync a pull would write the position and the heading would
+return to its correct spot.
+
+Upgrading to 0.5.6 fixes the root cause.  Existing positionless headings
+are repaired on the next pull — no manual intervention needed.
