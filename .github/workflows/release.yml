@@ -13,32 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Extract release notes
-        id: notes
-        run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          version="${tag#v}"
-          # Find the section in CHANGELOG.md or TROUBLESHOOTING.md matching
-          # this version; fall back to auto-generated notes.
-          if [ -f CHANGELOG.md ] && grep -q "## \[${version}\]" CHANGELOG.md; then
-            body=$(awk "/## \[${version}\]/{f=1; next} /^## \[/{f=0} f" CHANGELOG.md)
-          else
-            body=""
-          fi
-          {
-            echo "tag=${tag}<<EOF"
-            echo "${tag}"
-            echo "EOF"
-            echo "body<<EOF"
-            echo "${body}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body: ${{ steps.notes.outputs.body }}
-          generate_release_notes: ${{ steps.notes.outputs.body == '' }}
+          generate_release_notes: true
           draft: false
           prerelease: false
