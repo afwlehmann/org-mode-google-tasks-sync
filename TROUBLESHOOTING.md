@@ -64,7 +64,8 @@ for `Skip tick` lines.
 
 After visiting https://myaccount.google.com/permissions and removing the
 app, the next tick will fail authenticating.  Re-run `M-x
-org-mode-google-tasks-sync-authorize` (or the `bootstrap` helper if you're
+org-mode-google-tasks-sync-authorize` (or `nix run --refresh
+github:afwlehmann/org-mode-google-tasks-sync#bootstrap` if you're
 declaratively-managed) to mint a fresh token.
 
 ## Freshly-pushed subtask appears to disappear

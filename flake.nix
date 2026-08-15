@@ -120,7 +120,6 @@
             emacsForDev
             pkgs.gnupg
             pkgs.gh
-            pkgs.shellcheck
           ]
           ++ pre-commit-check.enabledPackages;
           shellHook = ''

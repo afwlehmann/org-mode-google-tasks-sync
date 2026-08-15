@@ -103,6 +103,24 @@ are never touched.
 
 ---
 
+## Nix integration
+
+The repo's flake exposes three outputs: a package (`.#default`, `.#org-mode-google-tasks-sync`), a preloaded Emacs (`.#emacs`, `nix run .#emacs`), and an OAuth bootstrap app (`.#bootstrap`).
+
+To bootstrap OAuth credentials without cloning the repo:
+
+```sh
+nix run --refresh github:afwlehmann/org-mode-google-tasks-sync#bootstrap
+```
+
+`--refresh` forces Nix to re-resolve the flake input so you pick up the latest `main` commit instead of a cached one. The helper prompts for `client_id` / `client_secret`, runs the OAuth consent flow, and prints `refresh_token` plus your Google Tasks list IDs to stdout — ready to paste into SOPS / Home Manager config.
+
+For non-Nix users, the equivalent is `M-x org-mode-google-tasks-sync-setup` from inside Emacs (see Step 1 below).
+
+The flake also provides a Nixpkgs overlay (`overlays.default`) and a Home Manager module (`homeManagerModules.default`); see `nix/hm-module.nix` for the option surface.
+
+---
+
 ## Configuration
 
 This section describes **every** user-facing variable and command. All variables live in the `org-mode-google-tasks-sync` customization group; `M-x customize-group RET org-mode-google-tasks-sync RET` works for any of them.

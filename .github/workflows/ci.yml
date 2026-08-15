@@ -21,49 +21,6 @@ concurrency:
 # dev environment contributors use.
 
 jobs:
-  shellcheck:
-    name: shellcheck (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-        with:
-          # FlakeHub disabled: no registry lookups, no FlakeHub
-          # binary cache — everything resolves via github: inputs
-          # and cache.nixos.org (plus Magic Nix Cache below).
-          flakehub: false
-      - name: Cache nix store
-        uses: actions/cache@v4
-        with:
-          path: /nix/store
-          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
-      - name: shellcheck bootstrap.sh
-        id: shellcheck
-        run: |
-          set -o pipefail
-          nix develop --command shellcheck bootstrap.sh 2>&1 | tee shellcheck.log
-      - name: Job summary
-        if: always()
-        run: |
-          {
-            echo "## shellcheck"
-            echo
-            if [ "${{ steps.shellcheck.outcome }}" = "success" ]; then
-              echo "✅ \`bootstrap.sh\` passed shellcheck."
-            else
-              echo "❌ shellcheck found issues:"
-              echo
-              echo '```'
-              cat shellcheck.log
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
   nix-eval:
     name: nix-eval (${{ matrix.os }})
     strategy:
@@ -251,7 +208,7 @@ jobs:
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [shellcheck, nix-eval, test, lint, build]
+    needs: [nix-eval, test, lint, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
