@@ -33,8 +33,13 @@
 (defconst org-mode-google-tasks-sync-oauth--auth-url
   "https://accounts.google.com/o/oauth2/v2/auth")
 
-(defconst org-mode-google-tasks-sync-oauth--token-url
-  "https://oauth2.googleapis.com/token")
+(defvar org-mode-google-tasks-sync-oauth--token-url
+  "https://oauth2.googleapis.com/token"
+  "Google OAuth 2.0 token endpoint for refresh.
+
+A `defvar' (not `defconst') so integration tests can `let'-bind it
+to a mock server URL without the byte-compiler inlining the
+production value at call sites.")
 
 (defconst org-mode-google-tasks-sync-oauth--scope
   "https://www.googleapis.com/auth/tasks")

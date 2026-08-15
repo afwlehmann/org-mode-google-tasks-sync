@@ -21,9 +21,13 @@
 (require 'subr-x)
 (require 'url-util)
 
-(defconst org-mode-google-tasks-sync-api--base-url
+(defvar org-mode-google-tasks-sync-api--base-url
   "https://tasks.googleapis.com/tasks/v1"
-  "Base URL for the Tasks v1 API.")
+  "Base URL for the Tasks v1 API.
+
+A `defvar' (not `defconst') so integration tests can `let'-bind it
+to a mock server URL without the byte-compiler inlining the
+production value at call sites.")
 
 (defconst org-mode-google-tasks-sync-api--page-size 100
   "Tasks per page when listing.  Max 100.")

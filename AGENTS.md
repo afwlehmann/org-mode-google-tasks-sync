@@ -246,3 +246,4 @@ Example: suppose Google adds a `priority` field to the Tasks API. To wire it in:
 - **Don't try to sync `position` via the tick path.** Position sync is driven exclusively by the advice on org's `M-↑`/`M-↓`/`M-←`/`M-→` keys (server-first via `tasks.move`). The tick path's `--sort-children` re-sorts by the stored `:GTASK_POSITION:` only; it never assigns new positions. Adding position writes to the tick would race with the advice callbacks.
 - **Don't add a verification flow for Google's "unverified app" warning.** Personal-use apps stay unverified by design.
 - **Don't read from `~/.authinfo.gpg` directly.** Always via `auth-source-search`.
+- **Don't "fix" `org-mode-google-tasks-sync-api--base-url` or `org-mode-google-tasks-sync-oauth--token-url` back to `defconst`.** They are deliberately `defvar` so integration tests can `let`-bind them to a Mockoon mock server URL. A `defconst` would get inlined by the byte-compiler at every call site, breaking test override.
