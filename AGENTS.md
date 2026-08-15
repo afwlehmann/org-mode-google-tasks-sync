@@ -131,6 +131,7 @@ On first plain-Emacs run this installs `plz` and `oauth2` into `test/.elpa/`; su
 Test files:
 - `test/org-mode-google-tasks-sync-org-test.el` — parser, hash stability, round-trip serialization.
 - `test/org-mode-google-tasks-sync-engine-test.el` — 4-cell conflict matrix, RFC3339 parsing, remote↔struct conversion, API payload shape.
+- `test/org-mode-google-tasks-sync-jump-test.el` — `jump-to-list` dispatch, entry filtering, navigation.
 
 There are intentionally no tests that hit the real Google API — those would be flaky and require credentials. Integration testing is manual; see the README troubleshooting section and the verification plan in the original design doc at `~/.claude/plans/i-need-tooling-to-dapper-moonbeam.md`.
 
