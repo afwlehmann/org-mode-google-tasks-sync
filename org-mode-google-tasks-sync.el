@@ -79,24 +79,152 @@ encoding flags) useful for diagnosing push failures."
     (define-key m (kbd "s") #'org-mode-google-tasks-sync)
     (define-key m (kbd "f") #'org-mode-google-tasks-sync-full-sync)
     (define-key m (kbd "n") #'org-mode-google-tasks-sync-new-task)
-    (define-key m (kbd "d") #'org-mode-google-tasks-sync-delete-at-point)
-    (define-key m (kbd "h") #'org-mode-google-tasks-sync-hide-done-mode)
-    (define-key m (kbd "H") #'org-mode-google-tasks-sync-show-done)
-    (define-key m (kbd "r") #'org-mode-google-tasks-sync-show-trash)
-    (define-key m (kbd "R") #'org-mode-google-tasks-sync-restore-at-point)
     (define-key m (kbd "l") #'org-mode-google-tasks-sync-show-log)
     (define-key m (kbd "j") #'org-mode-google-tasks-sync-jump-to-list)
     (define-key m (kbd "c") #'org-mode-google-tasks-sync-show-conflicts)
+    (define-key m (kbd "r") #'org-mode-google-tasks-sync-show-trash)
     m)
-  "Single-letter keymap for the package's interactive commands.
-Bind this map under whatever prefix suits you.  The README's
-recommendation is `C-c g' — that prefix is unused by Org mode and
-by org-roam (which lives at `C-c n'), so:
+  "Keymap for the package's global interactive commands.
+Bound under a configurable prefix when `org-mode-google-tasks-sync-mode'
+is enabled.  The prefix is composed from three defcustoms:
+`org-mode-google-tasks-sync-leader-key' (default is the leader key,
+typically the Emacs `C-c' prefix), `org-mode-google-tasks-sync-key-prefix'
+\(default \"g\"), and `org-mode-google-tasks-sync-key-subprefix'
+\(default nil).  With the defaults this gives `C-c g s' for sync,
+`C-c g n' for new task, `C-c g j' to jump to a list, and so on.
+Set the subprefix to \"t\" to get `C-c g t s' etc. when the
+`C-c g' namespace is shared with other packages.  Whatever was
+previously bound at the prefix is saved on enable and restored
+on disable.
 
-  (global-set-key (kbd \"C-c g\") org-mode-google-tasks-sync-command-map)
+Buffer-local commands (`d'/`h'/`H' in configured org buffers,
+`R' in the trash buffer) live in separate keymaps — see
+`org-mode-google-tasks-sync-buffer-map' and
+`org-mode-google-tasks-sync-trash-map'.")
 
-gives you `C-c g s' for sync, `C-c g n' for new task, `C-c g h' to
-toggle hide-DONE, and so on.")
+(defvar org-mode-google-tasks-sync-buffer-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "d") #'org-mode-google-tasks-sync-delete-at-point)
+    (define-key m (kbd "h") #'org-mode-google-tasks-sync-hide-done-mode)
+    (define-key m (kbd "H") #'org-mode-google-tasks-sync-show-done)
+    m)
+  "Keymap for commands that only make sense in a configured org buffer.
+Bound buffer-locally under the same prefix as
+`org-mode-google-tasks-sync-command-map' by
+`org-mode-google-tasks-sync-buffer-mode', which is auto-enabled
+via `find-file-hook' when the file is listed in
+`org-mode-google-tasks-sync-map'.")
+
+(defvar org-mode-google-tasks-sync-trash-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "R") #'org-mode-google-tasks-sync-restore-at-point)
+    m)
+  "Keymap for commands that only make sense in the trash buffer.
+Bound buffer-locally under the same prefix as
+`org-mode-google-tasks-sync-command-map' by
+`org-mode-google-tasks-sync-trash-mode', which is enabled when
+the trash buffer is created.")
+
+(defvar org-mode-google-tasks-sync--saved-prefix-binding nil
+  "Previous binding at the prefix key, saved on enable, restored on disable.")
+
+(defvar org-mode-google-tasks-sync--current-prefix nil
+  "The prefix string currently bound, or nil when nothing is bound.
+Tracked separately from the defcustoms so rebind knows which old
+key to unbind even after the user changed the values.")
+
+(defvar org-mode-google-tasks-sync-leader-key "C-c")
+(defvar org-mode-google-tasks-sync-key-prefix "g")
+(defvar org-mode-google-tasks-sync-key-subprefix nil)
+(defvar org-mode-google-tasks-sync-mode nil)
+
+(defun org-mode-google-tasks-sync--full-prefix ()
+  "Return the full key prefix as a kbd-parseable string.
+Combines `org-mode-google-tasks-sync-leader-key',
+`org-mode-google-tasks-sync-key-prefix', and
+`org-mode-google-tasks-sync-key-subprefix' (when non-nil)."
+  (concat org-mode-google-tasks-sync-leader-key
+          " " org-mode-google-tasks-sync-key-prefix
+          (when org-mode-google-tasks-sync-key-subprefix
+            (concat " " org-mode-google-tasks-sync-key-subprefix))))
+
+(defun org-mode-google-tasks-sync--bind-prefix ()
+  "Bind the command map at the current prefix.
+Save whatever is currently at that key into
+`org-mode-google-tasks-sync--saved-prefix-binding', then set the
+command map there.  Update `--current-prefix' to track what was
+bound."
+  (let ((key (kbd (org-mode-google-tasks-sync--full-prefix))))
+    (setq org-mode-google-tasks-sync--saved-prefix-binding
+          (lookup-key global-map key))
+    (global-set-key key org-mode-google-tasks-sync-command-map)
+    (setq org-mode-google-tasks-sync--current-prefix
+          (org-mode-google-tasks-sync--full-prefix))))
+
+(defun org-mode-google-tasks-sync--unbind-prefix ()
+  "Restore the previous binding at the current prefix.
+Unbind the command map and restore whatever was saved in
+`org-mode-google-tasks-sync--saved-prefix-binding'.  Clear both
+`--saved-prefix-binding' and `--current-prefix'."
+  (when org-mode-google-tasks-sync--current-prefix
+    (let ((key (kbd org-mode-google-tasks-sync--current-prefix)))
+      (if (and org-mode-google-tasks-sync--saved-prefix-binding
+               (not (eq org-mode-google-tasks-sync--saved-prefix-binding
+                        org-mode-google-tasks-sync-command-map)))
+          (global-set-key key org-mode-google-tasks-sync--saved-prefix-binding)
+        (global-unset-key key)))
+    (setq org-mode-google-tasks-sync--saved-prefix-binding nil
+          org-mode-google-tasks-sync--current-prefix nil)))
+
+(defun org-mode-google-tasks-sync--rebind-prefix ()
+  "Rebind the command map to the current prefix.
+Unbind the old prefix (restoring whatever was there before), then
+bind the new prefix.  Also rebuild the buffer-local and trash
+keymaps so they pick up the new prefix.  No-op when the mode is
+off — the next `--enable' picks up the new values."
+  (when org-mode-google-tasks-sync-mode
+    (org-mode-google-tasks-sync--unbind-prefix)
+    (org-mode-google-tasks-sync--bind-prefix)
+    (org-mode-google-tasks-sync--refresh-buffer-mode-map)
+    (org-mode-google-tasks-sync--refresh-trash-mode-map)))
+
+(defun org-mode-google-tasks-sync--set-and-rebind (symbol value)
+  "Set SYMBOL to VALUE, then rebind the prefix if the mode is active."
+  (set-default symbol value)
+  (org-mode-google-tasks-sync--rebind-prefix))
+
+(defcustom org-mode-google-tasks-sync-leader-key "C-c"
+  "Leader key under which the command map is bound.
+Combined with `org-mode-google-tasks-sync-key-prefix' and
+optionally `org-mode-google-tasks-sync-key-subprefix' to form the
+full prefix.  Changing this via `customize' rebinds immediately
+when `org-mode-google-tasks-sync-mode' is active."
+  :set #'org-mode-google-tasks-sync--set-and-rebind
+  :type 'string
+  :group 'org-mode-google-tasks-sync)
+
+(defcustom org-mode-google-tasks-sync-key-prefix "g"
+  "Package namespace key under the leader.
+Combined with `org-mode-google-tasks-sync-leader-key' to form the
+prefix at which the command map is bound.  Changing this via
+`customize' rebinds immediately when
+`org-mode-google-tasks-sync-mode' is active."
+  :set #'org-mode-google-tasks-sync--set-and-rebind
+  :type 'string
+  :group 'org-mode-google-tasks-sync)
+
+(defcustom org-mode-google-tasks-sync-key-subprefix nil
+  "Optional sub-namespace key under the package prefix.
+When nil (default), commands bind at `<leader> <prefix> <command>'.
+When non-nil (e.g. \"t\"), commands bind at
+`<leader> <prefix> <subprefix> <command>'.  Useful when the
+`<leader> <prefix>' namespace is shared with other packages.
+Changing this via `customize' rebinds immediately when
+`org-mode-google-tasks-sync-mode' is active."
+  :set #'org-mode-google-tasks-sync--set-and-rebind
+  :type '(choice (const :tag "No sub-prefix" nil)
+                 (string :tag "Sub-prefix key"))
+  :group 'org-mode-google-tasks-sync)
 
 (defcustom org-mode-google-tasks-sync-keep-done-items nil
   "Whether to keep completed (DONE) tasks in the local org buffer.
@@ -227,6 +355,74 @@ Convenience wrapper — equivalent to
   (interactive)
   (org-mode-google-tasks-sync-hide-done-mode -1))
 
+(defvar org-mode-google-tasks-sync-buffer-mode-map
+  (make-sparse-keymap)
+  "Keymap for `org-mode-google-tasks-sync-buffer-mode'.
+The prefix is populated dynamically by
+`org-mode-google-tasks-sync--refresh-buffer-mode-map' so it tracks
+`org-mode-google-tasks-sync-leader-key' et al.")
+
+(defun org-mode-google-tasks-sync--refresh-buffer-mode-map ()
+  "Rebuild `org-mode-google-tasks-sync-buffer-mode-map' from the current prefix.
+Recreates the keymap, then binds the full prefix to
+`org-mode-google-tasks-sync-buffer-map'.  Called on enable and on
+prefix rebind."
+  (setq org-mode-google-tasks-sync-buffer-mode-map (make-sparse-keymap))
+  (define-key org-mode-google-tasks-sync-buffer-mode-map
+    (kbd (org-mode-google-tasks-sync--full-prefix))
+    org-mode-google-tasks-sync-buffer-map))
+
+(define-minor-mode org-mode-google-tasks-sync-buffer-mode
+  "Buffer-local minor mode for configured Google Tasks org files.
+Binds `d'/`h'/`H' (delete-at-point, hide-done-mode, show-done)
+under the same prefix as the global command map.  Auto-enabled
+via `find-file-hook' when the file is listed in
+`org-mode-google-tasks-sync-map' and `org-mode-google-tasks-sync-mode'
+is on.  The global commands (`s'/`n'/`j'/etc.) remain available
+because they are bound in the global map, which this buffer-local
+map extends but does not shadow."
+  :lighter " GTasks-Buf"
+  :group 'org-mode-google-tasks-sync
+  :keymap org-mode-google-tasks-sync-buffer-mode-map
+  (when org-mode-google-tasks-sync-buffer-mode
+    (org-mode-google-tasks-sync--refresh-buffer-mode-map)))
+
+(defvar org-mode-google-tasks-sync-trash-mode-map
+  (make-sparse-keymap)
+  "Keymap for `org-mode-google-tasks-sync-trash-mode'.
+The prefix is populated dynamically by
+`org-mode-google-tasks-sync--refresh-trash-mode-map' so it tracks
+`org-mode-google-tasks-sync-leader-key' et al.")
+
+(defun org-mode-google-tasks-sync--refresh-trash-mode-map ()
+  "Rebuild `org-mode-google-tasks-sync-trash-mode-map' from the current prefix.
+Recreates the keymap, then binds the full prefix to
+`org-mode-google-tasks-sync-trash-map'.  Called on enable and on
+prefix rebind."
+  (setq org-mode-google-tasks-sync-trash-mode-map (make-sparse-keymap))
+  (define-key org-mode-google-tasks-sync-trash-mode-map
+    (kbd (org-mode-google-tasks-sync--full-prefix))
+    org-mode-google-tasks-sync-trash-map))
+
+(define-minor-mode org-mode-google-tasks-sync-trash-mode
+  "Buffer-local minor mode for the Google Tasks trash buffer.
+Binds `R' (restore-at-point) under the same prefix as the global
+command map.  Auto-enabled when the trash buffer is created."
+  :lighter " GTasks-Trash"
+  :group 'org-mode-google-tasks-sync
+  :keymap org-mode-google-tasks-sync-trash-mode-map
+  (when org-mode-google-tasks-sync-trash-mode
+    (org-mode-google-tasks-sync--refresh-trash-mode-map)))
+
+(defun org-mode-google-tasks-sync--maybe-enable-buffer-mode ()
+  "Auto-enable the buffer-local minor mode in a configured org file.
+Used as a `find-file-hook' when
+`org-mode-google-tasks-sync-mode' is on."
+  (when (and org-mode-google-tasks-sync-mode
+             (derived-mode-p 'org-mode)
+             (org-mode-google-tasks-sync--file-is-target-p (buffer-file-name)))
+    (org-mode-google-tasks-sync-buffer-mode 1)))
+
 (defun org-mode-google-tasks-sync--maybe-enable-hide-done ()
   "Auto-enable hide-done in a buffer if the file is a configured target.
 Used as a `find-file-hook' when
@@ -236,6 +432,7 @@ Used as a `find-file-hook' when
              (org-mode-google-tasks-sync--file-is-target-p (buffer-file-name)))
     (org-mode-google-tasks-sync-hide-done-mode 1)))
 
+(add-hook 'find-file-hook #'org-mode-google-tasks-sync--maybe-enable-buffer-mode)
 (add-hook 'find-file-hook #'org-mode-google-tasks-sync--maybe-enable-hide-done)
 
 (defconst org-mode-google-tasks-sync--trash-buffer-name
@@ -265,6 +462,7 @@ across sessions."
               (path (org-mode-google-tasks-sync--trash-file)))
           (with-current-buffer b
             (org-mode)
+            (org-mode-google-tasks-sync-trash-mode 1)
             (when (and path (file-exists-p path))
               (insert-file-contents path))
             (setq-local org-mode-google-tasks-sync--trash-source-path path))
@@ -1266,7 +1464,7 @@ look at *org-mode-google-tasks-sync-log* for diagnostic output."
        (org-mode-google-tasks-sync-engine--log "Tick failed: %S" err)))))
 
 (defun org-mode-google-tasks-sync--enable ()
-  "Install timers, hooks, and move/promote/demote advice."
+  "Install timers, hooks, move/promote/demote advice, and prefix binding."
   (when org-mode-google-tasks-sync--timer
     (cancel-timer org-mode-google-tasks-sync--timer))
   (when org-mode-google-tasks-sync--full-timer
@@ -1282,10 +1480,18 @@ look at *org-mode-google-tasks-sync-log* for diagnostic output."
                      org-mode-google-tasks-sync-full-sync-interval
                      #'org-mode-google-tasks-sync-full-sync))
   (add-hook 'after-save-hook #'org-mode-google-tasks-sync--after-save-hook)
-  (org-mode-google-tasks-sync--install-move-advice))
+  (org-mode-google-tasks-sync--install-move-advice)
+  (org-mode-google-tasks-sync--bind-prefix)
+  ;; Enable the buffer-local minor mode in any already-open configured
+  ;; org buffers.  Buffers opened later pick it up via `find-file-hook'.
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'org-mode)
+                 (org-mode-google-tasks-sync--file-is-target-p (buffer-file-name)))
+        (org-mode-google-tasks-sync-buffer-mode 1)))))
 
 (defun org-mode-google-tasks-sync--disable ()
-  "Tear down timers, hooks, and move/promote/demote advice."
+  "Tear down timers, hooks, advice, and prefix binding."
   (when org-mode-google-tasks-sync--timer
     (cancel-timer org-mode-google-tasks-sync--timer)
     (setq org-mode-google-tasks-sync--timer nil))
@@ -1293,7 +1499,13 @@ look at *org-mode-google-tasks-sync-log* for diagnostic output."
     (cancel-timer org-mode-google-tasks-sync--full-timer)
     (setq org-mode-google-tasks-sync--full-timer nil))
   (remove-hook 'after-save-hook #'org-mode-google-tasks-sync--after-save-hook)
-  (org-mode-google-tasks-sync--uninstall-move-advice))
+  (org-mode-google-tasks-sync--uninstall-move-advice)
+  (org-mode-google-tasks-sync--unbind-prefix)
+  ;; Disable the buffer-local minor mode in all live configured buffers.
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when org-mode-google-tasks-sync-buffer-mode
+        (org-mode-google-tasks-sync-buffer-mode -1)))))
 
 (provide 'org-mode-google-tasks-sync)
 ;;; org-mode-google-tasks-sync.el ends here
