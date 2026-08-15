@@ -107,6 +107,45 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+        with:
+          # FlakeHub disabled: no registry lookups, no FlakeHub
+          # binary cache — everything resolves via github: inputs
+          # and cache.nixos.org (plus Magic Nix Cache below).
+          flakehub: false
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - name: Run integration tests (Mockoon)
+        id: integration
+        run: |
+          nix develop --command emacs --batch \
+            -l test/integration/run-integration-tests.el \
+            -f ert-run-tests-batch-and-exit \
+            2>&1 | tee integration.log
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Integration tests (Mockoon mock server)"
+            echo
+            if grep -qE "^Ran [0-9]+ tests, [0-9]+ results as expected, 0 unexpected" integration.log; then
+              line=$(grep -oE "Ran [0-9]+ tests, [0-9]+ results as expected, 0 unexpected" integration.log | tail -1)
+              echo "✅ $line"
+            else
+              echo "❌ Integration test failures or run error."
+              echo
+              echo '```'
+              grep -E "^(   FAILED|Test [a-z/-]+ condition:|Ran |Error:)" integration.log | tail -30
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: lint (${{ matrix.os }})
     strategy:
@@ -239,7 +278,7 @@ jobs:
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [nix-eval, test, lint, nix-lint, build]
+    needs: [nix-eval, test, integration, lint, nix-lint, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

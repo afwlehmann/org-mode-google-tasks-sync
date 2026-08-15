@@ -44,7 +44,7 @@ single list, fuzzy `completing-read` otherwise; gated on
 `org-mode-google-tasks-sync-debug-jump-always-prompt`).  These call
 into the engine and API client but don't change the state machine.
 
-`test/` contains `ert` suites and a `test-helper.el` that installs `plz` + `oauth2` into a project-local `.elpa` so the user's `~/.emacs.d` is never touched.
+`test/` contains `ert` suites and a `test-helper.el` that installs `plz` + `oauth2` into a project-local `.elpa` so the user's `~/.emacs.d` is never touched. `test/integration/` contains integration tests that drive the full engine against a Mockoon mock server (see "Running tests" below).
 
 ## Key invariants
 
@@ -133,7 +133,15 @@ Test files:
 - `test/org-mode-google-tasks-sync-engine-test.el` — 4-cell conflict matrix, RFC3339 parsing, remote↔struct conversion, API payload shape.
 - `test/org-mode-google-tasks-sync-jump-test.el` — `jump-to-list` dispatch, entry filtering, navigation.
 
-There are intentionally no tests that hit the real Google API — those would be flaky and require credentials. Integration testing is manual; see the README troubleshooting section and the verification plan in the original design doc at `~/.claude/plans/i-need-tooling-to-dapper-moonbeam.md`.
+Integration tests under `test/integration/` drive the full sync engine against a [Mockoon](https://mockoon.com/) mock server that serves realistic Google Tasks API responses. The mock environment (`mockoon-environment.json`) is a hand-authored Mockoon data file — not generated from any OpenAPI spec — covering the 6 endpoints the engine calls (list tasklists, list tasks, insert, update, move, delete, get). The runner starts Mockoon via `npx --yes @mockoon/cli`, waits for readiness, runs ert, and kills the server in `unwind-protect`.
+
+```sh
+nix develop --command emacs --batch \
+  -l test/integration/run-integration-tests.el \
+  -f ert-run-tests-batch-and-exit
+```
+
+Requires `nodejs_22` (in the dev shell) for `npx @mockoon/cli`. CI runs integration tests on ubuntu-latest only. There are intentionally no tests that hit the real Google API — those would be flaky and require credentials.
 
 ## Releasing (version bump + tag)
 

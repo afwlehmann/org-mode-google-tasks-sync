@@ -1,0 +1,256 @@
+{
+  "uuid": "5602c614-900b-420b-b071-3a882f0d48e5",
+  "lastMigration": 26,
+  "name": "Google Tasks Mock",
+  "endpointPrefix": "",
+  "latency": 0,
+  "port": 3000,
+  "hostname": "127.0.0.1",
+  "folders": [],
+  "routes": [
+    {
+      "uuid": "76c7aaa8-2b15-420a-91ac-2c8349b93ab8",
+      "type": "http",
+      "documentation": "List all task lists (tasks.tasklists.list)",
+      "method": "get",
+      "endpoint": "/tasks/v1/users/@me/lists",
+      "responses": [
+        {
+          "uuid": "93e353a4-a261-4e41-a894-7a36d8dfedc5",
+          "body": "{\"kind\":\"tasks#taskLists\",\"items\":[{\"kind\":\"tasks#taskList\",\"id\":\"MOCK-LIST\",\"title\":\"Inbox\",\"updated\":\"2026-01-01T00:00:00.000Z\"}]}",
+          "latency": 0,
+          "statusCode": 200,
+          "label": "OK",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "filePath": "",
+          "databucketID": "",
+          "sendFileAsBody": false,
+          "rules": [],
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": []
+        }
+      ],
+      "responseMode": null,
+      "streamingMode": null,
+      "streamingInterval": 0
+    },
+    {
+      "uuid": "e933c7b2-54e4-41c6-92b8-04a3ca474388",
+      "type": "http",
+      "documentation": "List tasks in a list (tasks.tasks.list)",
+      "method": "get",
+      "endpoint": "/tasks/v1/lists/:listId/tasks",
+      "responses": [
+        {
+          "uuid": "0b68972e-8ae1-4144-ae1a-5f5409798aed",
+          "body": "{\"kind\":\"tasks#tasks\",\"items\":[{\"kind\":\"tasks#task\",\"id\":\"task-001\",\"title\":\"Buy milk\",\"notes\":\"2% organic\",\"status\":\"needsAction\",\"due\":\"2026-06-27T00:00:00.000Z\",\"position\":\"00001\",\"updated\":\"2026-01-01T00:00:00.000Z\",\"etag\":\"etag-001\",\"deleted\":false,\"hidden\":false,\"links\":[]},{\"kind\":\"tasks#task\",\"id\":\"task-002\",\"title\":\"Walk dog\",\"notes\":\"\",\"status\":\"needsAction\",\"due\":\"\",\"position\":\"00002\",\"updated\":\"2026-01-01T00:00:00.000Z\",\"etag\":\"etag-002\",\"deleted\":false,\"hidden\":false,\"links\":[]}]}",
+          "latency": 0,
+          "statusCode": 200,
+          "label": "OK",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "filePath": "",
+          "databucketID": "",
+          "sendFileAsBody": false,
+          "rules": [],
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": []
+        }
+      ],
+      "responseMode": null,
+      "streamingMode": null,
+      "streamingInterval": 0
+    },
+    {
+      "uuid": "72d92c93-114b-4f0f-801a-a6a5651d6e0e",
+      "type": "http",
+      "documentation": "Insert a new task (tasks.tasks.insert)",
+      "method": "post",
+      "endpoint": "/tasks/v1/lists/:listId/tasks",
+      "responses": [
+        {
+          "uuid": "b23a1f0b-6139-4fed-8e14-94cf9142d7b2",
+          "body": "{\"kind\":\"tasks#task\",\"id\":\"new-{{objectId}}\",\"title\":\"{{body 'title'}}\",\"notes\":\"{{body 'notes'}}\",\"status\":\"{{body 'status'}}\",\"due\":\"{{body 'due'}}\",\"position\":\"0000{{objectId}}\",\"updated\":\"2026-01-02T00:00:00.000Z\",\"etag\":\"etag-new-{{objectId}}\",\"deleted\":false,\"hidden\":false,\"links\":[]}",
+          "latency": 0,
+          "statusCode": 200,
+          "label": "Created",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "filePath": "",
+          "databucketID": "",
+          "sendFileAsBody": false,
+          "rules": [],
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": []
+        }
+      ],
+      "responseMode": null,
+      "streamingMode": null,
+      "streamingInterval": 0
+    },
+    {
+      "uuid": "f49232f4-1a4a-49c1-a3bc-6bb18202d91c",
+      "type": "http",
+      "documentation": "Update a task (tasks.tasks.update — PUT used by engine)",
+      "method": "put",
+      "endpoint": "/tasks/v1/lists/:listId/tasks/:taskId",
+      "responses": [
+        {
+          "uuid": "bdfb2599-0840-4144-9d01-81ef2a67ba16",
+          "body": "{\"kind\":\"tasks#task\",\"id\":\"{{urlParam 'taskId'}}\",\"title\":\"{{body 'title'}}\",\"notes\":\"{{body 'notes'}}\",\"status\":\"{{body 'status'}}\",\"due\":\"{{body 'due'}}\",\"position\":\"{{body 'position'}}\",\"updated\":\"2026-01-03T00:00:00.000Z\",\"etag\":\"etag-updated-{{objectId}}\",\"deleted\":false,\"hidden\":false,\"links\":[]}",
+          "latency": 0,
+          "statusCode": 200,
+          "label": "OK",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "filePath": "",
+          "databucketID": "",
+          "sendFileAsBody": false,
+          "rules": [],
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": []
+        }
+      ],
+      "responseMode": null,
+      "streamingMode": null,
+      "streamingInterval": 0
+    },
+    {
+      "uuid": "458f7d27-2140-4eae-9b4c-01468b206546",
+      "type": "http",
+      "documentation": "Move a task (tasks.tasks.move)",
+      "method": "post",
+      "endpoint": "/tasks/v1/lists/:listId/tasks/:taskId/move",
+      "responses": [
+        {
+          "uuid": "b18d86ac-2568-4a2a-bfa3-0dfecf308e29",
+          "body": "{\"kind\":\"tasks#task\",\"id\":\"{{urlParam 'taskId'}}\",\"position\":\"0000{{objectId}}\",\"updated\":\"2026-01-04T00:00:00.000Z\",\"etag\":\"etag-moved-{{objectId}}\",\"deleted\":false,\"hidden\":false,\"links\":[]}",
+          "latency": 0,
+          "statusCode": 200,
+          "label": "OK",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "filePath": "",
+          "databucketID": "",
+          "sendFileAsBody": false,
+          "rules": [],
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": []
+        }
+      ],
+      "responseMode": null,
+      "streamingMode": null,
+      "streamingInterval": 0
+    },
+    {
+      "uuid": "3df453c3-e435-4c72-8806-374a64501fce",
+      "type": "http",
+      "documentation": "Delete a task (tasks.tasks.delete)",
+      "method": "delete",
+      "endpoint": "/tasks/v1/lists/:listId/tasks/:taskId",
+      "responses": [
+        {
+          "uuid": "d70fe536-4e18-4eb4-94ae-0082961965cf",
+          "body": "",
+          "latency": 0,
+          "statusCode": 204,
+          "label": "No Content",
+          "headers": [],
+          "bodyType": "INLINE",
+          "filePath": "",
+          "databucketID": "",
+          "sendFileAsBody": false,
+          "rules": [],
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": []
+        }
+      ],
+      "responseMode": null,
+      "streamingMode": null,
+      "streamingInterval": 0
+    },
+    {
+      "uuid": "22b4a7af-8f1b-458a-95f0-253905c42be7",
+      "type": "http",
+      "documentation": "Get a single task (tasks.tasks.get — used by 412 finalizer)",
+      "method": "get",
+      "endpoint": "/tasks/v1/lists/:listId/tasks/:taskId",
+      "responses": [
+        {
+          "uuid": "0142df4a-54f0-492a-9b30-1f47930345df",
+          "body": "{\"kind\":\"tasks#task\",\"id\":\"{{urlParam 'taskId'}}\",\"title\":\"Server title\",\"notes\":\"Server notes\",\"status\":\"needsAction\",\"due\":\"\",\"position\":\"00001\",\"updated\":\"2026-01-05T00:00:00.000Z\",\"etag\":\"etag-server-{{objectId}}\",\"deleted\":false,\"hidden\":false,\"links\":[]}",
+          "latency": 0,
+          "statusCode": 200,
+          "label": "OK",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "filePath": "",
+          "databucketID": "",
+          "sendFileAsBody": false,
+          "rules": [],
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": []
+        }
+      ],
+      "responseMode": null,
+      "streamingMode": null,
+      "streamingInterval": 0
+    }
+  ],
+  "rootChildren": [
+    { "uuid": "76c7aaa8-2b15-420a-91ac-2c8349b93ab8", "type": "route" },
+    { "uuid": "e933c7b2-54e4-41c6-92b8-04a3ca474388", "type": "route" },
+    { "uuid": "72d92c93-114b-4f0f-801a-a6a5651d6e0e", "type": "route" },
+    { "uuid": "f49232f4-1a4a-49c1-a3bc-6bb18202d91c", "type": "route" },
+    { "uuid": "458f7d27-2140-4eae-9b4c-01468b206546", "type": "route" },
+    { "uuid": "3df453c3-e435-4c72-8806-374a64501fce", "type": "route" },
+    { "uuid": "22b4a7af-8f1b-458a-95f0-253905c42be7", "type": "route" }
+  ],
+  "proxyMode": false,
+  "proxyHost": "",
+  "proxyRemovePrefix": false,
+  "tlsOptions": {
+    "enabled": false,
+    "type": "CERT",
+    "pfxPath": "",
+    "certPath": "",
+    "keyPath": "",
+    "caPath": "",
+    "passphrase": ""
+  },
+  "cors": true,
+  "headers": [],
+  "proxyReqHeaders": [],
+  "proxyResHeaders": [],
+  "data": [],
+  "callbacks": []
+}
