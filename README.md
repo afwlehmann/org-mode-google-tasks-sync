@@ -19,6 +19,7 @@ This package syncs **Google Tasks only** — not Google Calendar events.
 - Google Tasks has no push API, so all sync is poll-based.
 - State (per-task ID, ETag, server `updated` timestamp, content hash) lives in each heading's `:PROPERTIES:` drawer. There is no external database.
 - Secrets are accessed exclusively through Emacs's `auth-source`.  By default all three (`client_id`, `client_secret`, `refresh_token`) live in `~/.authinfo.gpg`.  When the Home Manager bridge is used instead, all three live in a single chmod-0600 netrc file under `$XDG_DATA_HOME` — `~/.authinfo.gpg` is never touched by this package.
+- Key bindings are auto-installed under a configurable prefix (default `C-c g`) when the minor mode is enabled.  Only configured org files get the buffer-local commands (`d`/`h`/`H`); the trash buffer gets `R`.
 
 ## What is and isn't synced
 
@@ -194,6 +195,31 @@ This installs:
 - A periodic timer that calls `org-mode-google-tasks-sync` every `org-mode-google-tasks-sync-poll-interval` seconds.
 - A separate timer that calls `org-mode-google-tasks-sync-full-sync` every `org-mode-google-tasks-sync-full-sync-interval` seconds.
 - An `after-save-hook` that triggers an incremental sync ~1 second after you save any configured target file.
+- Advice on org's `M-↑`/`M-↓`/`M-←`/`M-→` keys for server-first reorder/repaint via `tasks.move` (see [Reorder and reparent](#reorder-and-reparent-with-orgs-own-keys)).
+- The command keymap under a configurable prefix (see [Key bindings](#key-bindings)).
+- A buffer-local minor mode in each configured org file (enables `d`/`h`/`H` under the prefix).
+
+### What the minor mode does and doesn't affect
+
+**Only files listed in `org-mode-google-tasks-sync-map` are touched.** Files not in the map (other org files, non-org buffers) are never synced, never modified, and never get the buffer-local key bindings.
+
+**What you get with the mode on:**
+- Background sync on a timer + after-save hook (pulls server changes, pushes local edits).
+- Position sync via `M-↑`/`M-↓`/`M-←`/`M-→` (server-first `tasks.move`). Without the mode, reordering a synced heading locally gets undone by the next sync's `--sort-children`.
+- Immediate push on save (~1 s after `C-x C-s` on a configured file).
+- Key bindings under the prefix (global + buffer-local).
+
+**What you lose with the mode off:**
+- No background pull — server-side changes wait until you manually `M-x org-mode-google-tasks-sync`.
+- No after-save push — local edits wait until the next manual sync.
+- No position sync — `M-↑`/`M-↓` move the heading locally, but the next sync re-sorts by `:GTASK_POSITION:` and the heading snaps back.
+- No key bindings — the prefix is unbound (or restored to whatever was there before).
+
+**What the mode does *not* change:**
+- Your `org-mode` key bindings (except the configured prefix).
+- Editing behavior in non-configured org files.
+- The global keymap outside the prefix.
+- `org-mode-map` — the package never adds keys to it directly.
 
 ---
 
@@ -202,9 +228,19 @@ This installs:
 | Variable | Default | What it does |
 |---|---|---|
 | `org-mode-google-tasks-sync-map` | `nil` | Alist of `(LIST-ID . (FILE . PARENT-HEADING))` entries. See above. **Required** for sync to do anything. |
-| `org-mode-google-tasks-sync-poll-interval` | `300` | Seconds between incremental sync ticks while the minor mode is on. |
+| `org-mode-google-tasks-sync-leader-key` | `"C-c"` | Leader key under which the command map is bound. |
+| `org-mode-google-tasks-sync-key-prefix` | `"g"` | Package namespace key under the leader. Combined with `leader-key` to form the prefix (default `C-c g`). |
+| `org-mode-google-tasks-sync-key-subprefix` | `nil` | Optional sub-namespace key (e.g. `"t"` → `C-c g t …`). Set when the `C-c g` namespace is shared with other packages. |
+| `org-mode-google-tasks-sync-tick-interval` | `60` | Seconds between wake-up checks. Each tick runs a cheap predicate (no network) that decides whether a sync is due. |
+| `org-mode-google-tasks-sync-poll-interval` | `300` | Maximum seconds between syncs. Safety net so Google-side changes get pulled even when no local file has been modified. |
 | `org-mode-google-tasks-sync-full-sync-interval` | `86400` (1 day) | Seconds between full reconciliation passes. Full sync drops `updatedMin` and diffs Google's full ID set against local IDs to detect long-tombstoned deletions. |
+| `org-mode-google-tasks-sync-keep-done-items` | `nil` | When nil (default), completed tasks are removed from the local buffer (trash-snapshotted). When `t`, completed tasks stay as DONE headings (historical behavior). |
+| `org-mode-google-tasks-sync-hide-done-by-default` | `nil` | When non-nil, auto-enable `hide-done-mode` in configured org files on open. |
+| `org-mode-google-tasks-sync-persist-trash` | `t` | When non-nil, persist the trash buffer to `$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org`. |
+| `org-mode-google-tasks-sync-log-level` | `'info` | Log verbosity. `'debug` adds per-request diagnostics (body length, encoding flags). |
 | `org-mode-google-tasks-sync-debug-jump-always-prompt` | `nil` | Debug flag. When non-nil, `org-mode-google-tasks-sync-jump-to-list` always prompts even with a single reachable list. Set at runtime with `setq`. |
+
+Changing the prefix defcustoms via `customize` (`M-x customize-group RET org-mode-google-tasks-sync RET`) rebinds the keys immediately — no need to toggle the minor mode off and on.
 
 ### What goes where
 
@@ -242,12 +278,19 @@ Heading properties written by the package:
 | `org-mode-google-tasks-sync-configure` | Prompt for client_id + client_secret; store in auth-source. Idempotent. |
 | `org-mode-google-tasks-sync-authorize` | Run the OAuth consent flow; store refresh_token in auth-source. |
 | `org-mode-google-tasks-sync-list-discover` | List your Google task lists with their IDs in a buffer. |
+| `org-mode-google-tasks-sync-setup` | One-shot: configure + authorize + list-discover. |
 | `org-mode-google-tasks-sync` | Run one incremental sync pass right now. |
 | `org-mode-google-tasks-sync-full-sync` | Run a full reconciliation now (detects old tombstones). |
+| `org-mode-google-tasks-sync-new-task` | Prompt for title + optional due date, insert heading under configured parent, save (triggers sync). |
+| `org-mode-google-tasks-sync-delete-at-point` | Delete the synced task at point from Google (with trash snapshot). |
+| `org-mode-google-tasks-sync-show-trash` | Pop to the trash buffer. |
+| `org-mode-google-tasks-sync-restore-at-point` | Restore the trash entry at point (creates fresh task or reopens original). |
 | `org-mode-google-tasks-sync-show-log` | Pop to the action log buffer. |
 | `org-mode-google-tasks-sync-show-conflicts` | Pop to the conflict quarantine buffer. |
 | `org-mode-google-tasks-sync-jump-to-list` | Jump to a configured Google Tasks list from anywhere. With one reachable list, goes directly; with more, prompts with fuzzy completion. |
-| `org-mode-google-tasks-sync-mode` | Global minor mode. Toggle on to install the sync timer and save hook. |
+| `org-mode-google-tasks-sync-hide-done-mode` | Buffer-local minor mode: hide DONE headings via invisibility overlays. |
+| `org-mode-google-tasks-sync-show-done` | Turn off `hide-done-mode` in the current buffer. |
+| `org-mode-google-tasks-sync-mode` | Global minor mode. Toggle on to install timers, hooks, move advice, and key bindings. |
 
 ---
 
@@ -280,18 +323,21 @@ Run into trouble?  See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — covers `(e
 
 ---
 
-## Suggested key bindings
+## Key bindings
 
-The package does **not** install keybindings itself — it only ships the `org-mode-google-tasks-sync-command-map` keymap.  Bind it under a prefix in your `init.el`, guarded by `with-eval-after-load` so the keymap variable is non-nil at bind time:
+Enabling `org-mode-google-tasks-sync-mode` binds the package's commands under a configurable prefix.  The prefix is composed from three defcustoms:
 
-```elisp
-(with-eval-after-load 'org-mode-google-tasks-sync
-  (global-set-key (kbd "C-c g") org-mode-google-tasks-sync-command-map))
-```
+| Defcustom | Default | Role |
+|---|---|---|
+| `org-mode-google-tasks-sync-leader-key` | `"C-c"` | Leader key |
+| `org-mode-google-tasks-sync-key-prefix` | `"g"` | Package namespace |
+| `org-mode-google-tasks-sync-key-subprefix` | `nil` | Optional sub-namespace (e.g. `"t"` for `C-c g t …`) |
 
-The `with-eval-after-load` guard matters: without it, the keymap is still `nil` if your init runs the `global-set-key` before the package is loaded (common with `use-package :defer t` or when the line sits ahead of the `require`).  `C-c g` then silently binds to nothing — `M-x org-mode-google-tasks-sync` still works (the commands are autoloaded) but the keys are dead.  If your `C-c g …` chords don't respond, check `C-h v org-mode-google-tasks-sync-command-map RET` — `nil` means the package isn't loaded yet.
+With the defaults this gives `C-c g s` for sync, `C-c g n` for new task, etc.  Set the subprefix to `"t"` to get `C-c g t s` etc. when the `C-c g` namespace is shared with other packages.  Change them via `M-x customize-group RET org-mode-google-tasks-sync RET` — the keys rebind immediately, no toggle needed.
 
 `C-c g …` doesn't conflict with stock org-mode (which uses `C-c C-…`, `C-c a`, `C-c c`, `C-c l`, `C-c '` etc.) or with [org-roam](https://www.orgroam.com/) (whose prefix is `C-c n …`).
+
+### Global commands (available in any buffer)
 
 | Key | Command |
 |---|---|
@@ -299,16 +345,45 @@ The `with-eval-after-load` guard matters: without it, the keymap is still `nil` 
 | `C-c g s` | `org-mode-google-tasks-sync` (incremental sync now) |
 | `C-c g f` | `org-mode-google-tasks-sync-full-sync` |
 | `C-c g n` | `org-mode-google-tasks-sync-new-task` |
-| `C-c g d` | `org-mode-google-tasks-sync-delete-at-point` |
-| `C-c g h` | toggle `org-mode-google-tasks-sync-hide-done-mode` |
-| `C-c g H` | `org-mode-google-tasks-sync-show-done` |
-| `C-c g r` | `org-mode-google-tasks-sync-show-trash` |
-| `C-c g R` | `org-mode-google-tasks-sync-restore-at-point` (inside trash buffer) |
+| `C-c g j` | `org-mode-google-tasks-sync-jump-to-list` |
 | `C-c g l` | `org-mode-google-tasks-sync-show-log` |
 | `C-c g c` | `org-mode-google-tasks-sync-show-conflicts` |
-| `C-c g j` | `org-mode-google-tasks-sync-jump-to-list` |
+| `C-c g r` | `org-mode-google-tasks-sync-show-trash` |
 
-Use a different prefix if `C-c g` clashes with something in your own config — the keymap is independent of the prefix you choose.
+### Buffer-local commands (configured org files only)
+
+These are bound by `org-mode-google-tasks-sync-buffer-mode`, a buffer-local minor mode that is auto-enabled via `find-file-hook` when the file is listed in `org-mode-google-tasks-sync-map` and the global mode is on.  They are **not** available in non-configured org files or non-org buffers.
+
+| Key | Command | Why buffer-local |
+|---|---|---|
+| `C-c g d` | `org-mode-google-tasks-sync-delete-at-point` | Requires a synced heading at point (`GTASK_ID` property). |
+| `C-c g h` | toggle `org-mode-google-tasks-sync-hide-done-mode` | Only useful in configured buffers (that's where DONE headings accumulate from sync). |
+| `C-c g H` | `org-mode-google-tasks-sync-show-done` | Turns off `hide-done-mode` in the current buffer. |
+
+### Trash buffer commands
+
+| Key | Command | Why buffer-local |
+|---|---|---|
+| `C-c g R` | `org-mode-google-tasks-sync-restore-at-point` | Only works in the trash buffer (`*org-mode-google-tasks-sync-trash*`). |
+
+The trash buffer gets its own minor mode (`org-mode-google-tasks-sync-trash-mode`) when it's created.  The global commands (above) are also available there.
+
+### Save/restore of previous bindings
+
+When the mode is enabled, whatever was previously bound at the prefix is saved.  When the mode is disabled (or the prefix is changed via `customize`), the previous binding is restored.  This means enabling the mode is non-destructive — if you had something else at `C-c g`, disabling the mode puts it back.
+
+### Manual binding (advanced)
+
+If you prefer to bind the keymap yourself instead of using the defcustoms, don't enable the mode's auto-binding.  You can `global-set-key` the keymap directly — but you lose the save/restore and auto-rebind behavior.  The defcustoms are the recommended path:
+
+```elisp
+;; Instead of this:
+;; (global-set-key (kbd "C-c g") org-mode-google-tasks-sync-command-map)
+
+;; Just enable the mode — it binds for you:
+(org-mode-google-tasks-sync-mode 1)
+;; The prefix defaults to C-c g.  Change via customize if needed.
+```
 
 ---
 

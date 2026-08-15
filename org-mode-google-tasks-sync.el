@@ -30,7 +30,10 @@
 (defcustom org-mode-google-tasks-sync-map nil
   "Alist mapping Google Tasks list IDs to org file + parent heading.
 Each entry has the form (LIST-ID . (FILE . PARENT-HEADING)).
-Sync touches only direct children under PARENT-HEADING in FILE."
+Sync touches only direct children under PARENT-HEADING in FILE.
+Only files listed here are affected by the minor mode; all other
+org files and non-org buffers are left alone.  See the README for
+the literal-match rules on PARENT-HEADING."
   :type '(alist :key-type string
                 :value-type (cons file string))
   :group 'org-mode-google-tasks-sync)
@@ -1419,7 +1422,31 @@ to `tasks.move' cleanly.  Refuses with a clear message."
 
 ;;;###autoload
 (define-minor-mode org-mode-google-tasks-sync-mode
-  "Global minor mode that keeps org files synced with Google Tasks."
+  "Global minor mode for two-way sync between org files and Google Tasks.
+
+When enabled, installs:
+- A periodic timer (every `org-mode-google-tasks-sync-tick-interval'
+  seconds) that checks whether a sync is due and fires one if so.
+- A full-reconciliation timer (every
+  `org-mode-google-tasks-sync-full-sync-interval' seconds) that
+  detects long-tombstoned deletions.
+- An `after-save-hook' that triggers an incremental sync ~1 s
+  after you save any file listed in `org-mode-google-tasks-sync-map'.
+- Advice on org's `M-<up>'/`M-<down>'/`M-<left>'/`M-<right>' keys
+  for server-first reorder/reparent via `tasks.move'.
+- The command keymap under a configurable prefix (see
+  `org-mode-google-tasks-sync-leader-key',
+  `org-mode-google-tasks-sync-key-prefix',
+  `org-mode-google-tasks-sync-key-subprefix').
+- A buffer-local minor mode (`org-mode-google-tasks-sync-buffer-mode')
+  in each configured org file, enabling `d'/`h'/`H' under the prefix.
+
+Only files listed in `org-mode-google-tasks-sync-map' are
+affected.  Other org files and non-org buffers are never synced,
+modified, or key-bound.
+
+When disabled, all timers, hooks, advice, and key bindings are
+removed.  Whatever was previously bound at the prefix is restored."
   :global t
   :lighter " GTasks"
   :group 'org-mode-google-tasks-sync
