@@ -85,6 +85,7 @@ encoding flags) useful for diagnosing push failures."
     (define-key m (kbd "r") #'org-mode-google-tasks-sync-show-trash)
     (define-key m (kbd "R") #'org-mode-google-tasks-sync-restore-at-point)
     (define-key m (kbd "l") #'org-mode-google-tasks-sync-show-log)
+    (define-key m (kbd "j") #'org-mode-google-tasks-sync-jump-to-list)
     (define-key m (kbd "c") #'org-mode-google-tasks-sync-show-conflicts)
     m)
   "Single-letter keymap for the package's interactive commands.
@@ -118,6 +119,17 @@ restore the prior behavior."
 When non-nil, opening any file referenced by
 `org-mode-google-tasks-sync-map' turns the mode on automatically.
 Per-buffer; the minor mode itself is opt-in for other files."
+  :type 'boolean
+  :group 'org-mode-google-tasks-sync)
+
+(defcustom org-mode-google-tasks-sync-debug-jump-always-prompt nil
+  "Debug flag: force `org-mode-google-tasks-sync-jump-to-list' to always prompt.
+When nil (default), the command jumps immediately when exactly one
+configured list is reachable.  When non-nil, the selection prompt is
+shown even with a single list, which is useful for diagnosing map
+entries or checking that filtering works.  Set this variable at
+runtime with `setq' — the change takes effect immediately, no
+re-init needed."
   :type 'boolean
   :group 'org-mode-google-tasks-sync)
 
@@ -663,6 +675,85 @@ touch window configuration."
   "Pop to the conflict quarantine buffer."
   (interactive)
   (pop-to-buffer (org-mode-google-tasks-sync-engine-conflicts-buffer)))
+
+(defun org-mode-google-tasks-sync--valid-jump-entries ()
+  "Return entries from `org-mode-google-tasks-sync-map' that are reachable.
+Each entry is (FILE PARENT-HEADING).  An entry is reachable
+when FILE exists on disk and contains a top-level heading whose
+title is exactly PARENT-HEADING.  Entries whose file is missing or
+whose parent heading is absent are silently skipped — the engine
+auto-creates the parent on first sync, so an absent heading means
+the user hasn't synced that list yet and there's nothing to jump
+to."
+  (cl-remove-if-not
+   (lambda (entry)
+     (let ((file (cadr entry))
+           (parent (cddr entry)))
+       (and (stringp file)
+            (stringp parent)
+            (file-exists-p file)
+            (with-current-buffer (find-file-noselect file)
+              (save-excursion
+                (goto-char (point-min))
+                (re-search-forward
+                 (format "^\\*+ %s$" (regexp-quote parent))
+                 nil t))))))
+   org-mode-google-tasks-sync-map))
+
+(defun org-mode-google-tasks-sync--jump-to-entry (entry)
+  "Open FILE in ENTRY and move point to its PARENT-HEADING.
+ENTRY is (FILE PARENT-HEADING) as returned by
+`org-mode-google-tasks-sync--valid-jump-entries'.  Switches to an
+existing buffer for FILE if one is already open; otherwise visits
+the file.  Leaves outline visibility unchanged — folding is left
+to `org-mode'."
+  (let ((file (cadr entry))
+        (parent (cddr entry)))
+    (find-file file)
+    (goto-char (point-min))
+    (re-search-forward (format "^\\*+ %s$" (regexp-quote parent)) nil t)
+    (org-back-to-heading t)
+    (recenter)))
+
+;;;###autoload
+(defun org-mode-google-tasks-sync-jump-to-list ()
+  "Switch to a configured Google Tasks list from anywhere in Emacs.
+Walks `org-mode-google-tasks-sync-map' and keeps entries whose file
+exists on disk and contains the configured parent heading (the
+engine auto-creates the parent on first sync, so an absent heading
+means the list hasn't been synced yet and there's nothing to jump
+to).
+
+When exactly one reachable entry exists and
+`org-mode-google-tasks-sync-debug-jump-always-prompt' is nil
+\(the default), jump directly to it.  Otherwise prompt with
+`completing-read'; the prompt always uses fuzzy completion —
+`completion-styles' is bound to `(flex orderless substring)' around
+the call, so `flex' (built into Emacs 27+) provides fuzzy matching
+unconditionally and `orderless' enhances it when installed."
+  (interactive)
+  (let ((entries (org-mode-google-tasks-sync--valid-jump-entries)))
+    (cond
+     ((null entries)
+      (user-error
+        "No reachable task lists; check `org-mode-google-tasks-sync-map'"))
+     ((and (null (cdr entries))
+           (not org-mode-google-tasks-sync-debug-jump-always-prompt))
+      (org-mode-google-tasks-sync--jump-to-entry (car entries)))
+     (t
+      (let* ((candidates
+              (mapcar (lambda (e) (cons (cddr e) e)) entries))
+             (choice
+              (let ((completion-styles '(flex orderless substring))
+                    (completion-ignore-case t))
+                (completing-read
+                 "Task list: "
+                 (mapcar #'car candidates)
+                 nil t)))
+             (entry (cdr (assoc choice candidates))))
+        (unless entry
+          (user-error "No entry for %S" choice))
+        (org-mode-google-tasks-sync--jump-to-entry entry))))))
 
 (defun org-mode-google-tasks-sync--detect-hm-bridge ()
   "Point writes at the HM bridge's XDG files when they exist.

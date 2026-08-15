@@ -37,9 +37,12 @@ The entry-point file also hosts buffer-local view/edit features: the
 `org-after-todo-state-change-hook`), the `delete-at-point` /
 `show-trash` / `restore-at-point` trio that goes through the trash
 buffer (`*org-mode-google-tasks-sync-trash*`, optionally persisted to
-`$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org`), and the
-`new-task` convenience prompt.  These call into the engine and API
-client but don't change the state machine.
+`$XDG_DATA_HOME/org-mode-google-tasks-sync/trash.org`), the
+`new-task` convenience prompt, and the `jump-to-list` command that
+switches to any reachable configured task list (auto-jump on a
+single list, fuzzy `completing-read` otherwise; gated on
+`org-mode-google-tasks-sync-debug-jump-always-prompt`).  These call
+into the engine and API client but don't change the state machine.
 
 `test/` contains `ert` suites and a `test-helper.el` that installs `plz` + `oauth2` into a project-local `.elpa` so the user's `~/.emacs.d` is never touched.
 

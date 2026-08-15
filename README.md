@@ -186,6 +186,7 @@ This installs:
 | `org-mode-google-tasks-sync-map` | `nil` | Alist of `(LIST-ID . (FILE . PARENT-HEADING))` entries. See above. **Required** for sync to do anything. |
 | `org-mode-google-tasks-sync-poll-interval` | `300` | Seconds between incremental sync ticks while the minor mode is on. |
 | `org-mode-google-tasks-sync-full-sync-interval` | `86400` (1 day) | Seconds between full reconciliation passes. Full sync drops `updatedMin` and diffs Google's full ID set against local IDs to detect long-tombstoned deletions. |
+| `org-mode-google-tasks-sync-debug-jump-always-prompt` | `nil` | Debug flag. When non-nil, `org-mode-google-tasks-sync-jump-to-list` always prompts even with a single reachable list. Set at runtime with `setq`. |
 
 ### What goes where
 
@@ -227,6 +228,7 @@ Heading properties written by the package:
 | `org-mode-google-tasks-sync-full-sync` | Run a full reconciliation now (detects old tombstones). |
 | `org-mode-google-tasks-sync-show-log` | Pop to the action log buffer. |
 | `org-mode-google-tasks-sync-show-conflicts` | Pop to the conflict quarantine buffer. |
+| `org-mode-google-tasks-sync-jump-to-list` | Jump to a configured Google Tasks list from anywhere. With one reachable list, goes directly; with more, prompts with fuzzy completion. |
 | `org-mode-google-tasks-sync-mode` | Global minor mode. Toggle on to install the sync timer and save hook. |
 
 ---
@@ -286,6 +288,7 @@ The `with-eval-after-load` guard matters: without it, the keymap is still `nil` 
 | `C-c g R` | `org-mode-google-tasks-sync-restore-at-point` (inside trash buffer) |
 | `C-c g l` | `org-mode-google-tasks-sync-show-log` |
 | `C-c g c` | `org-mode-google-tasks-sync-show-conflicts` |
+| `C-c g j` | `org-mode-google-tasks-sync-jump-to-list` |
 
 Use a different prefix if `C-c g` clashes with something in your own config — the keymap is independent of the prefix you choose.
 
