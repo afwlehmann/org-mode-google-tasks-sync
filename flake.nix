@@ -89,6 +89,17 @@
                 ${pkgs.git}/bin/git add -u
               ''}";
             };
+
+            # Static analysis for Nix (common idioms / anti-patterns).
+            statix.enable = true;
+
+            # Detect unused lambda arguments in Nix code.
+            # `noLambdaPatternNames` keeps flake `outputs = { self, ... }:` clean
+            # — `self` is conventionally kept even when unused here.
+            deadnix = {
+              enable = true;
+              settings.noLambdaPatternNames = true;
+            };
           };
         };
       in
@@ -99,20 +110,22 @@
           emacs = emacsWithPackage;
         };
 
-        apps.emacs = {
-          type = "app";
-          program = "${emacsWithPackage}/bin/emacs";
-          meta.description = "Emacs preloaded with org-mode-google-tasks-sync";
-        };
+        apps = {
+          emacs = {
+            type = "app";
+            program = "${emacsWithPackage}/bin/emacs";
+            meta.description = "Emacs preloaded with org-mode-google-tasks-sync";
+          };
 
-        apps.bootstrap = {
-          type = "app";
-          program = "${pkgs.writeShellScript "org-mode-google-tasks-sync-bootstrap" ''
-            exec ${emacsWithPackage}/bin/emacs --batch \
-              -l org-mode-google-tasks-sync \
-              -f org-mode-google-tasks-sync-bootstrap
-          ''}";
-          meta.description = "Interactive OAuth bootstrap: prompts for client_id and client_secret, captures the consent redirect, and prints the refresh token plus Google Tasks list IDs.";
+          bootstrap = {
+            type = "app";
+            program = "${pkgs.writeShellScript "org-mode-google-tasks-sync-bootstrap" ''
+              exec ${emacsWithPackage}/bin/emacs --batch \
+                -l org-mode-google-tasks-sync \
+                -f org-mode-google-tasks-sync-bootstrap
+            ''}";
+            meta.description = "Interactive OAuth bootstrap: prompts for client_id and client_secret, captures the consent redirect, and prints the refresh token plus Google Tasks list IDs.";
+          };
         };
 
         devShells.default = pkgs.mkShell {
@@ -120,6 +133,7 @@
             emacsForDev
             pkgs.gnupg
             pkgs.gh
+            pkgs.nodejs_22
           ]
           ++ pre-commit-check.enabledPackages;
           shellHook = ''
@@ -168,7 +182,7 @@
                 touch $out
               '';
 
-          pre-commit-check = pre-commit-check;
+          inherit pre-commit-check;
         };
       }
     );

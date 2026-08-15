@@ -181,7 +181,9 @@ nix develop   # hooks are installed automatically
 Hooks configured (see `flake.nix`):
 - **convco** (commit-msg) — enforces Conventional Commits.
 - **emacs-lint-checks** (pre-commit) — runs `hooks/lint.el` + the full ert test suite when `.el` files are staged.
-- **nixfmt-classic** (pre-commit) — formats `.nix` files.
+- **nixfmt** (pre-commit) — formats `.nix` files.
+- **statix** (pre-commit) — static analysis for Nix (common idioms / anti-patterns).
+- **deadnix** (pre-commit) — detects unused lambda arguments in Nix code. `noLambdaPatternNames` is set so flake `outputs = { self, ... }:` doesn't get flagged (`self` is conventionally kept even when unused).
 
 Run all hooks manually: `nix develop -c pre-commit run --all-files`
 

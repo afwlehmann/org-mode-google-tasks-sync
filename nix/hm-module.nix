@@ -231,7 +231,10 @@ in
     };
 
     logLevel = lib.mkOption {
-      type = lib.types.enum [ "info" "debug" ];
+      type = lib.types.enum [
+        "info"
+        "debug"
+      ];
       default = "info";
       description = ''
         Log verbosity for the sync engine.  `info` logs sync actions
@@ -294,45 +297,43 @@ in
         # declaring their own Emacs setup elsewhere.  GnuPG is needed in PATH
         # for Emacs's EasyPG to read/write `.gpg` auth-source files.  plz and
         # oauth2 flow in automatically via the package's `packageRequires`.
-        programs.emacs.enable = lib.mkDefault true;
-        programs.emacs.extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
-        home.packages = [ pkgs.gnupg ];
-
-        programs.emacs.extraConfig = lib.mkAfter ''
-          ;; --- org-mode-google-tasks-sync (managed by Home Manager) ---
-          (require 'org-mode-google-tasks-sync)
-          ${lib.optionalString hasStaticCreds ''
-            (with-eval-after-load 'auth-source
-              (add-to-list 'auth-sources "${staticPath}")
-              (add-to-list 'auth-sources "${dynamicPath}"))
-            (setq org-mode-google-tasks-sync-oauth-write-target "${dynamicPath}")
-          ''}
-          (setq org-mode-google-tasks-sync-map
-                '(${mapAsElisp}))
-          (setq org-mode-google-tasks-sync-tick-interval ${toString cfg.tickInterval})
-          (setq org-mode-google-tasks-sync-poll-interval ${toString cfg.pollInterval})
-          (setq org-mode-google-tasks-sync-fetch-timeout ${toString cfg.fetchTimeout})
-          (setq org-mode-google-tasks-sync-full-sync-interval ${toString cfg.fullSyncInterval})
-          (setq org-mode-google-tasks-sync-hide-done-by-default ${
-            if cfg.hideDoneByDefault then "t" else "nil"
-          })
-          (setq org-mode-google-tasks-sync-log-level '${cfg.logLevel})
-          (setq org-mode-google-tasks-sync-persist-trash ${
-            if cfg.persistTrash then "t" else "nil"
-          })
-          ${
-            lib.optionalString (cfg.oauthWriteTarget != null && !hasStaticCreds) ''
+        programs.emacs = {
+          enable = lib.mkDefault true;
+          extraPackages = epkgs: [ epkgs.org-mode-google-tasks-sync ];
+          extraConfig = lib.mkAfter ''
+              ;; --- org-mode-google-tasks-sync (managed by Home Manager) ---
+              (require 'org-mode-google-tasks-sync)
+              ${lib.optionalString hasStaticCreds ''
+                (with-eval-after-load 'auth-source
+                  (add-to-list 'auth-sources "${staticPath}")
+                  (add-to-list 'auth-sources "${dynamicPath}"))
+                (setq org-mode-google-tasks-sync-oauth-write-target "${dynamicPath}")
+              ''}
+            (setq org-mode-google-tasks-sync-map
+                  '(${mapAsElisp}))
+            (setq org-mode-google-tasks-sync-tick-interval ${toString cfg.tickInterval})
+            (setq org-mode-google-tasks-sync-poll-interval ${toString cfg.pollInterval})
+            (setq org-mode-google-tasks-sync-fetch-timeout ${toString cfg.fetchTimeout})
+            (setq org-mode-google-tasks-sync-full-sync-interval ${toString cfg.fullSyncInterval})
+            (setq org-mode-google-tasks-sync-hide-done-by-default ${
+              if cfg.hideDoneByDefault then "t" else "nil"
+            })
+            (setq org-mode-google-tasks-sync-log-level '${cfg.logLevel})
+            (setq org-mode-google-tasks-sync-persist-trash ${if cfg.persistTrash then "t" else "nil"})
+            ${lib.optionalString (cfg.oauthWriteTarget != null && !hasStaticCreds) ''
               (setq org-mode-google-tasks-sync-oauth-write-target "${cfg.oauthWriteTarget}")
-            ''
-          }
-          ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}
-          ${lib.optionalString (cfg.keyPrefix != null) ''
-            (with-eval-after-load 'org-mode-google-tasks-sync
-              (global-set-key (kbd "${cfg.keyPrefix}") org-mode-google-tasks-sync-command-map))
-          ''}
-          ${cfg.extraConfig}
-          ;; --- end org-mode-google-tasks-sync ---
-        '';
+            ''}
+            ${lib.optionalString cfg.autoEnableMode "(org-mode-google-tasks-sync-mode 1)"}
+            ${lib.optionalString (cfg.keyPrefix != null) ''
+              (with-eval-after-load 'org-mode-google-tasks-sync
+                (global-set-key (kbd "${cfg.keyPrefix}") org-mode-google-tasks-sync-command-map))
+            ''}
+            ${cfg.extraConfig}
+            ;; --- end org-mode-google-tasks-sync ---
+          '';
+        };
+
+        home.packages = [ pkgs.gnupg ];
       }
 
       # When bridge is active: encrypt static-creds + drop .dir-locals.el.

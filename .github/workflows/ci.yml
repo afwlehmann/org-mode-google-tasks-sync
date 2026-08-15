@@ -14,11 +14,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Every job: `DeterminateSystems/magic-nix-cache-action` (free for public repos)
-# shares the GitHub-hosted cache of /nix/store across jobs and across pushes.
-# First push warms it; subsequent runs in the same matrix cell are cache-hits.
-# `nix develop --command` is used in every job so the CI exercises the same
-# dev environment contributors use.
+# Every job uses `DeterminateSystems/nix-installer-action@v22` to install
+# Nix and `DeterminateSystems/magic-nix-cache-action@v14` to share the
+# GitHub-hosted cache of /nix/store across jobs and across pushes.
+# `nix develop --command` is used in every job so the CI exercises the
+# same dev environment contributors use.
 
 jobs:
   nix-eval:
@@ -29,19 +29,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@v22
         with:
           # FlakeHub disabled: no registry lookups, no FlakeHub
           # binary cache — everything resolves via github: inputs
           # and cache.nixos.org (plus Magic Nix Cache below).
           flakehub: false
-      - name: Cache nix store
-        uses: actions/cache@v4
-        with:
-          path: /nix/store
-          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
       - name: Evaluate flake outputs
         id: eval
         run: |
@@ -76,19 +73,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@v22
         with:
           # FlakeHub disabled: no registry lookups, no FlakeHub
           # binary cache — everything resolves via github: inputs
           # and cache.nixos.org (plus Magic Nix Cache below).
           flakehub: false
-      - name: Cache nix store
-        uses: actions/cache@v4
-        with:
-          path: /nix/store
-          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
       - name: Run ert tests
         id: ert
         run: |
@@ -121,19 +115,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@v22
         with:
           # FlakeHub disabled: no registry lookups, no FlakeHub
           # binary cache — everything resolves via github: inputs
           # and cache.nixos.org (plus Magic Nix Cache below).
           flakehub: false
-      - name: Cache nix store
-        uses: actions/cache@v4
-        with:
-          path: /nix/store
-          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
       - name: Byte-compile + checkdoc lint
         id: lint
         run: |
@@ -157,6 +148,49 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  nix-lint:
+    name: nix-lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+        with:
+          # FlakeHub disabled: no registry lookups, no FlakeHub
+          # binary cache — everything resolves via github: inputs
+          # and cache.nixos.org (plus Magic Nix Cache below).
+          flakehub: false
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - name: statix + deadnix
+        id: nix-lint
+        run: |
+          nix develop --command sh -c '
+            set -o pipefail
+            statix check . 2>&1 | tee statix.log
+            deadnix --no-lambda-pattern-names . 2>&1 | tee deadnix.log
+          ' 2>&1 | tee nix-lint.log
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## nix-lint (statix + deadnix)"
+            echo
+            if [ "${{ steps.nix-lint.outcome }}" = "success" ]; then
+              echo "✅ statix + deadnix clean."
+            else
+              echo "❌ nix-lint found issues."
+              echo
+              echo '```'
+              tail -40 nix-lint.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
     name: nix build (${{ matrix.os }})
     strategy:
@@ -165,19 +199,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@v22
         with:
           # FlakeHub disabled: no registry lookups, no FlakeHub
           # binary cache — everything resolves via github: inputs
           # and cache.nixos.org (plus Magic Nix Cache below).
           flakehub: false
-      - name: Cache nix store
-        uses: actions/cache@v4
-        with:
-          path: /nix/store
-          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
       - name: Build the package
         id: build
         run: |
@@ -208,10 +239,10 @@ jobs:
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [nix-eval, test, lint, build]
+    needs: [nix-eval, test, lint, nix-lint, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Delete existing release (if any)
