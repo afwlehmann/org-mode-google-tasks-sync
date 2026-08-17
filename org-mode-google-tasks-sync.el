@@ -382,31 +382,37 @@ Silently does nothing when invoked outside a configured org buffer
            (list-id (org-mode-google-tasks-sync-org-task-list-id task))
            (title (org-mode-google-tasks-sync-org-task-title task))
            (source-file (buffer-file-name)))
-      (cond
-       ((not id)
-        (user-error "Heading has no :GTASK_ID:; not a synced task"))
-       ((not list-id)
-        (user-error "Heading is missing :GTASK_LIST: — can't tell which list to delete from"))
-       ((not (yes-or-no-p (format "Delete task %S from Google? " title)))
-        (message "Deletion cancelled."))
-       (t
-        (let ((token (org-mode-google-tasks-sync-engine--token))
-              (start (save-excursion (org-back-to-heading t) (point)))
-              (end   (save-excursion (org-end-of-subtree t t) (point))))
-          (org-mode-google-tasks-sync-api-delete-task
-           token list-id id
-           (lambda (_)
-             (org-mode-google-tasks-sync--snapshot-to-trash task source-file)
-             (with-current-buffer (find-file-noselect source-file)
-               (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
-                 (delete-region start end)
-                 (save-buffer)))
-             (org-mode-google-tasks-sync-engine--log "Deleted: %s" title)
-             (message "Deleted %S; snapshot in *…-trash*" title))
-           (lambda (err)
-             (org-mode-google-tasks-sync-engine--log
-              "Delete error for %S: %S" title err)
-             (message "Delete failed: %S" err)))))))))
+       (cond
+        ((not id)
+         (user-error "Heading has no :GTASK_ID:; not a synced task"))
+        ((not list-id)
+         (user-error "Heading is missing :GTASK_LIST: — can't tell which list to delete from"))
+        ((not (yes-or-no-p (format "Delete task %S from Google? " title)))
+         (message "Deletion cancelled."))
+        (t
+         (let ((start (save-excursion (org-back-to-heading t) (point)))
+               (end   (save-excursion (org-end-of-subtree t t) (point))))
+           (message "Deleting… (queued)")
+           (org-mode-google-tasks-sync-engine--enqueue
+            'delete id
+            (lambda (done)
+              (let ((token (org-mode-google-tasks-sync-engine--token)))
+                (org-mode-google-tasks-sync-api-delete-task
+                 token list-id id
+                 (lambda (_)
+                   (org-mode-google-tasks-sync--snapshot-to-trash task source-file)
+                   (with-current-buffer (find-file-noselect source-file)
+                     (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+                       (delete-region start end)
+                       (save-buffer)))
+                   (org-mode-google-tasks-sync-engine--log "Deleted: %s" title)
+                   (message "Deleted %S; snapshot in *…-trash*" title)
+                   (funcall done))
+                 (lambda (err)
+                   (org-mode-google-tasks-sync-engine--log
+                    "Delete error for %S: %S" title err)
+                   (message "Delete failed: %S" err)
+                   (funcall done))))))))))))
 
 ;;;###autoload
 (defun org-mode-google-tasks-sync-show-trash ()
@@ -1073,7 +1079,10 @@ move params (either may be nil).  TITLE is for logging.
 HEADING-MARKER, when given, pins the server-state write to the moved
 heading; without it the async callback would write GTASK_POSITION
 onto whatever heading point happens to be on, and the next tick's
-sort would reset the moved task to its old position."
+sort would reset the moved task to its old position.
+When called from inside a `move' queue item, this function does not
+itself run ORIG-FN or save; the caller's queue handler wires the
+local move + save as the POST-MOVE-FN step."
   (org-mode-google-tasks-sync-api-move-task
    token list-id task-id
    (lambda (resp)
@@ -1093,12 +1102,41 @@ sort would reset the moved task to its old position."
      (message "Move failed: %S" err))
    new-parent-id previous-id))
 
+(defun org-mode-google-tasks-sync--enqueue-move
+    (list-id task-id new-parent-id previous-id title heading-marker
+     post-move-fn)
+  "Enqueue a `move' action item to run on the action queue for LIST-ID.
+TASK-ID identifies the task.  NEW-PARENT-ID and PREVIOUS-ID are the
+move params (either may be nil).  TITLE is for logging.  HEADING-MARKER
+pins the server-state write to the moved heading.  POST-MOVE-FN runs
+in the move's success callback (typically the local heading move +
+save).  Serialize the server-first move against any in-flight sync so
+the post-apply sort inside a sync can't race with the move's position
+write.  Return immediately; the user sees \"Moving…\" in the echo
+area and the move runs once the worker reaches this item (queued
+ahead of any pending background sync).  If a `move' for the same
+TASK-ID is already queued, replace it — the user kept pressing the
+key and only the latest target matters."
+  (message "Moving… (queued)")
+  (org-mode-google-tasks-sync-engine--enqueue
+   'move task-id
+   (lambda (done)
+     (let ((token (org-mode-google-tasks-sync-engine--token)))
+       (org-mode-google-tasks-sync--apply-server-move
+        token list-id task-id new-parent-id previous-id title
+        (lambda (resp)
+          (when post-move-fn (funcall post-move-fn resp))
+          (funcall done))
+        heading-marker)))))
+
 (defun org-mode-google-tasks-sync--advised-move (orig-fn direction)
   "Advice wrapper for `org-move-subtree-up' / `org-move-subtree-down'.
 ORIG-FN is the original function; DIRECTION is `up or `down.
-Performs a server-first move: calls `tasks.move' and only runs
-ORIG-FN after the server confirms, so the post-apply sort step
-can't undo the local reorder."
+Enqueues a server-first move as a `move' queue item so the local
+heading only moves once the server confirms, and so the move is
+serialized against any in-flight sync (the post-apply sort inside a
+sync can't undo the local reorder by sorting on a stale
+:GTASK_POSITION:)."
   (if (not (org-mode-google-tasks-sync--synced-task-at-point-p))
       (funcall orig-fn)
     (let* ((list-id (org-entry-get nil "GTASK_LIST" t))
@@ -1106,26 +1144,24 @@ can't undo the local reorder."
            (title (or (org-element-property
                        :raw-value (org-element-at-point)) ""))
            (params (org-mode-google-tasks-sync--compute-move-params direction))
-           (token (org-mode-google-tasks-sync-engine--token))
            (marker (org-mode-google-tasks-sync-org--sticky-marker)))
       (when params
-        (message "Moving…")
-        (org-mode-google-tasks-sync--apply-server-move
-         token list-id task-id
-         (car params) (cdr params) title
+        (org-mode-google-tasks-sync--enqueue-move
+         list-id task-id (car params) (cdr params) title marker
          (lambda (_resp)
            (with-current-buffer (marker-buffer marker)
              (save-excursion
                (goto-char marker)
                (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
                  (funcall orig-fn)
-                 (save-buffer)))))
-         marker)))))
+                 (save-buffer))))))))))
 
 (defun org-mode-google-tasks-sync--advised-promote (orig-fn)
   "Advice wrapper for `org-do-promote'.
 ORIG-FN is the original `org-do-promote'.  Promotes a subtask to
-top-level: parent=nil, previous=former parent."
+top-level: parent=nil, previous=former parent.  Enqueued as a `move'
+queue item so the server-first call is serialized against any
+in-flight sync."
   (if (not (org-mode-google-tasks-sync--synced-task-at-point-p))
       (funcall orig-fn)
     (save-excursion
@@ -1137,26 +1173,23 @@ top-level: parent=nil, previous=former parent."
                (task-id (org-entry-get nil "GTASK_ID"))
                (title (or (org-element-property
                            :raw-value (org-element-at-point)) ""))
-               (token (org-mode-google-tasks-sync-engine--token))
                (marker (org-mode-google-tasks-sync-org--sticky-marker)))
-          (message "Promoting…")
-          (org-mode-google-tasks-sync--apply-server-move
-           token list-id task-id
-           nil parent-id title
+          (org-mode-google-tasks-sync--enqueue-move
+           list-id task-id nil parent-id title marker
            (lambda (_resp)
              (with-current-buffer (marker-buffer marker)
                (save-excursion
                  (goto-char marker)
                  (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
                    (funcall orig-fn)
-                   (save-buffer)))))
-           marker))))))
+                   (save-buffer)))))))))))
 
 (defun org-mode-google-tasks-sync--advised-demote (orig-fn)
   "Advice wrapper for `org-do-demote'.
 ORIG-FN is the original `org-do-demote'.  Demotes a top-level task
 to subtask: parent=preceding sibling, previous=last existing child
-of that sibling."
+of that sibling.  Enqueued as a `move' queue item so the server-first
+call is serialized against any in-flight sync."
   (if (not (org-mode-google-tasks-sync--synced-task-at-point-p))
       (funcall orig-fn)
     (let* ((list-id (org-entry-get nil "GTASK_LIST" t))
@@ -1164,21 +1197,17 @@ of that sibling."
            (title (or (org-element-property
                        :raw-value (org-element-at-point)) ""))
            (params (org-mode-google-tasks-sync--compute-demote-params))
-           (token (org-mode-google-tasks-sync-engine--token))
            (marker (org-mode-google-tasks-sync-org--sticky-marker)))
       (when params
-        (message "Demoting…")
-        (org-mode-google-tasks-sync--apply-server-move
-         token list-id task-id
-         (car params) (cdr params) title
+        (org-mode-google-tasks-sync--enqueue-move
+         list-id task-id (car params) (cdr params) title marker
          (lambda (_resp)
            (with-current-buffer (marker-buffer marker)
              (save-excursion
                (goto-char marker)
                (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
                  (funcall orig-fn)
-                 (save-buffer)))))
-         marker)))))
+                 (save-buffer))))))))))
 
 (defun org-mode-google-tasks-sync--refuse-subtree-op (orig-fn)
   "Advice wrapper that refuses subtree-wide promote/demote on synced headings.
@@ -1323,6 +1352,7 @@ Keybindings are not touched — the package exposes
   (when org-mode-google-tasks-sync--full-timer
     (cancel-timer org-mode-google-tasks-sync--full-timer))
   (setq org-mode-google-tasks-sync-engine--last-sync-time nil)
+  (org-mode-google-tasks-sync-engine--queue-reset)
   ;; First tick fires 1 s after enable so the user gets an immediate sync
   ;; on Emacs start; subsequent ticks fire every `tick-interval'.
   (setq org-mode-google-tasks-sync--timer
@@ -1345,7 +1375,8 @@ Keybindings are not touched — the package never bound any."
     (cancel-timer org-mode-google-tasks-sync--full-timer)
     (setq org-mode-google-tasks-sync--full-timer nil))
   (remove-hook 'after-save-hook #'org-mode-google-tasks-sync--after-save-hook)
-  (org-mode-google-tasks-sync--uninstall-move-advice))
+  (org-mode-google-tasks-sync--uninstall-move-advice)
+  (org-mode-google-tasks-sync-engine--queue-reset))
 
 (provide 'org-mode-google-tasks-sync)
 ;;; org-mode-google-tasks-sync.el ends here

@@ -256,16 +256,29 @@ surfaces as CURLE_FAILED_INIT (2) on any body with non-ASCII code points."
     (should (equal "Zahlung über Fußweg" (alist-get 'notes back)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/run-keeps-state-idle-on-token-error ()
-  "If `engine--token' throws, `engine-run' must leave `--state' alone.
-Regression for the deadlock where a GPG-not-found error left the
-state machine stuck at `fetching', causing every subsequent tick to
-take the `Skip tick: sync in flight' early-return until Emacs restart."
+  "If `engine--token' throws, `engine-run' leaves the worker idle.
+Under the action-queue model `engine-run' just enqueues; the token
+fetch happens in `--run-sync-pass' inside the worker.  When that
+throws, the item completes with state reset to `idle' so the next
+tick can try again — instead of leaving a phantom running item that
+would block the worker forever (the queue-based analog of the old
+stuck-at-`fetching' deadlock)."
   (let ((org-mode-google-tasks-sync-engine--state 'idle)
+        (org-mode-google-tasks-sync-engine--running nil)
+        (org-mode-google-tasks-sync-engine--queue nil)
+        (org-mode-google-tasks-sync-engine--worker-scheduled nil)
         (org-mode-google-tasks-sync-map '(("L" . ("/tmp/x.org" . "h")))))
     (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--token)
-               (lambda () (signal 'error '("simulated GPG failure")))))
-      (should-error (org-mode-google-tasks-sync-engine-run 'incremental))
-      (should (eq org-mode-google-tasks-sync-engine--state 'idle)))))
+               (lambda () (signal 'error '("simulated GPG failure"))))
+              ((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest _args)
+                 ;; Drive the worker synchronously so the token error
+                 ;; happens inside the test.
+                 (funcall fn))))
+      (org-mode-google-tasks-sync-engine-run 'incremental)
+      (should (eq org-mode-google-tasks-sync-engine--state 'idle))
+      (should (null org-mode-google-tasks-sync-engine--running))
+      (should (null org-mode-google-tasks-sync-engine--queue)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/token-returns-cached-when-not-expired ()
   "A cached token whose `expires-at' is in the future is returned as-is.
@@ -313,14 +326,23 @@ take the `Skip tick: sync in flight' early-return until Emacs restart."
         (should (eq tok org-mode-google-tasks-sync-engine--token))))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/timeout-resets-stuck-state ()
-  "When the timeout timer fires while state is not idle, it resets to idle."
-  (let ((org-mode-google-tasks-sync-engine--state 'fetching))
-    (org-mode-google-tasks-sync-engine--on-timeout)
-    (should (eq org-mode-google-tasks-sync-engine--state 'idle))))
+  "When the timeout fires with a running sync item, it drops it and resets state.
+The worker advances instead of parking forever on a hung item."
+  (let ((org-mode-google-tasks-sync-engine--running
+         (list 'incremental-sync 'incremental-sync #'ignore nil 0.0))
+        (org-mode-google-tasks-sync-engine--state 'fetching)
+        (org-mode-google-tasks-sync-engine--worker-scheduled nil)
+        (org-mode-google-tasks-sync-engine--queue nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _args) (setq org-mode-google-tasks-sync-engine--worker-scheduled t))))
+      (org-mode-google-tasks-sync-engine--on-timeout)
+      (should (null org-mode-google-tasks-sync-engine--running))
+      (should (eq org-mode-google-tasks-sync-engine--state 'idle)))))
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/timeout-noop-when-idle ()
-  "If the sync completed before the timeout fires, the timer is a no-op."
-  (let ((org-mode-google-tasks-sync-engine--state 'idle))
+  "If no item is running when the timeout fires, it's a no-op on state."
+  (let ((org-mode-google-tasks-sync-engine--running nil)
+        (org-mode-google-tasks-sync-engine--state 'idle))
     (org-mode-google-tasks-sync-engine--on-timeout)
     (should (eq org-mode-google-tasks-sync-engine--state 'idle))))
 
@@ -1711,4 +1733,200 @@ buffer when called from `--apply-server-move's `:then' callback)."
       (delete-file file))))
 
 (provide 'org-mode-google-tasks-sync-engine-test)
+
+;;; -- action queue -----------------------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/queue-dedup-coalesces-sync ()
+  "Repeated `incremental-sync' enqueues collapse into one pending item.
+The worker, when run, executes the pass exactly once — not once per
+trigger.  This is what prevents a save→hook→sync→save echo storm
+from piling up."
+  (org-mode-google-tasks-sync-engine--queue-reset)
+  (let ((runs 0))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _args) nil)))
+      (dotimes (_ 5)
+        (org-mode-google-tasks-sync-engine--enqueue
+         'incremental-sync 'incremental-sync
+         (lambda (done) (setq runs (1+ runs)) (funcall done)))))
+    (should (= 1 (length org-mode-google-tasks-sync-engine--queue)))
+    ;; Drain the queue synchronously.
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _args) nil)))
+      (org-mode-google-tasks-sync-engine--worker-step))
+    (should (= 1 runs))
+    (should (null org-mode-google-tasks-sync-engine--queue))
+    (should (null org-mode-google-tasks-sync-engine--running))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/queue-move-replaces-queued ()
+  "A newer `move' for the same task-id replaces a queued `move' for it.
+Only the latest target runs; the older handler never fires."
+  (org-mode-google-tasks-sync-engine--queue-reset)
+  (let (ran-targets)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _args) nil)))
+      (org-mode-google-tasks-sync-engine--enqueue
+       'move "task-1"
+       (lambda (done) (push :old ran-targets) (funcall done)))
+      (org-mode-google-tasks-sync-engine--enqueue
+       'move "task-1"
+       (lambda (done) (push :new ran-targets) (funcall done)))
+      ;; One pending `move' for task-1, the newer handler.
+      (should (= 1 (length org-mode-google-tasks-sync-engine--queue)))
+      (org-mode-google-tasks-sync-engine--worker-step))
+    (should (equal '(:new) ran-targets))
+    (should (null org-mode-google-tasks-sync-engine--queue))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/queue-move-distinct-tasks-both-run ()
+  "Distinct-task `move' items are not coalesced — both must run."
+  (org-mode-google-tasks-sync-engine--queue-reset)
+  (let (ran-targets)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _args) nil)))
+      (org-mode-google-tasks-sync-engine--enqueue
+       'move "task-1"
+       (lambda (done) (push 1 ran-targets) (funcall done)))
+      (org-mode-google-tasks-sync-engine--enqueue
+       'move "task-2"
+       (lambda (done) (push 2 ran-targets) (funcall done)))
+      (org-mode-google-tasks-sync-engine--worker-step)
+      ;; Worker runs one item then needs another step (in production
+      ;; the completion callback re-steps; here we drive it).
+      (org-mode-google-tasks-sync-engine--worker-step))
+    (should (equal '(2 1) ran-targets))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/queue-priority-interactive-first ()
+  "Interactive items (move/delete) jump the queue ahead of pending syncs.
+A `move' enqueued after an `incremental-sync' runs before it."
+  (org-mode-google-tasks-sync-engine--queue-reset)
+  (let (order)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _args) nil)))
+      (org-mode-google-tasks-sync-engine--enqueue
+       'incremental-sync 'incremental-sync
+       (lambda (done) (push :sync order) (funcall done)))
+      (org-mode-google-tasks-sync-engine--enqueue
+       'move "task-1"
+       (lambda (done) (push :move order) (funcall done)))
+      ;; The move should be at the head of the queue.
+      (should (eq 'move
+                  (car (car org-mode-google-tasks-sync-engine--queue))))
+      (org-mode-google-tasks-sync-engine--worker-step)
+      (org-mode-google-tasks-sync-engine--worker-step))
+    ;; Move ran first, then sync.
+    (should (equal '(:sync :move) order))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/queue-timeout-advances-worker ()
+  "When the per-item timeout fires, the running item is dropped and the
+worker advances to the next pending item."
+  (org-mode-google-tasks-sync-engine--queue-reset)
+  (let (ran)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'org-mode-google-tasks-sync-engine--arm-timeout)
+               #'ignore))
+      ;; Enqueue a stuck sync (never calls done — simulates a hang).
+      (org-mode-google-tasks-sync-engine--enqueue
+       'incremental-sync 'incremental-sync
+       (lambda (_done)
+         (push :stuck ran)))
+      ;; Start the stuck item.
+      (org-mode-google-tasks-sync-engine--worker-step)
+      (should org-mode-google-tasks-sync-engine--running)
+      (should (equal :stuck (car ran)))
+      ;; While it's hung, a move is enqueued.  It jumps the queue
+      ;; (priority) but can't run until the stuck item is dropped.
+      (org-mode-google-tasks-sync-engine--enqueue
+       'move "task-2"
+       (lambda (done) (push :moved ran) (funcall done)))
+      (should org-mode-google-tasks-sync-engine--running)
+      ;; Timeout drops the stuck item and steps the worker, which now
+      ;; runs the pending move.
+      (org-mode-google-tasks-sync-engine--on-timeout)
+      (should (null org-mode-google-tasks-sync-engine--running))
+      (should (equal :moved (car ran)))
+      (should (null org-mode-google-tasks-sync-engine--queue)))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/queue-pending-p ()
+  "`--queue-pending-p' reports both queued and running items of TYPE."
+  (org-mode-google-tasks-sync-engine--queue-reset)
+  (cl-letf (((symbol-function 'run-at-time)
+             (lambda (&rest _args) nil)))
+    (should-not (org-mode-google-tasks-sync-engine--queue-pending-p 'full-sync))
+    (org-mode-google-tasks-sync-engine--enqueue
+     'full-sync 'full-sync (lambda (done) (funcall done)))
+    (should (org-mode-google-tasks-sync-engine--queue-pending-p 'full-sync))))
+
+;;; -- sort-needed gating -----------------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/sort-needed-flag-roundtrip ()
+  "Mark, check, and clear the sort-needed flag for a list-id."
+  (let ((org-mode-google-tasks-sync-engine--sort-needed nil))
+    (should-not (org-mode-google-tasks-sync-engine--sort-needed-p "L"))
+    (org-mode-google-tasks-sync-engine--sort-needed-mark "L")
+    (should (org-mode-google-tasks-sync-engine--sort-needed-p "L"))
+    (org-mode-google-tasks-sync-engine--sort-needed-clear "L")
+    (should-not (org-mode-google-tasks-sync-engine--sort-needed-p "L"))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/sort-needed-flag-is-per-list ()
+  "Marking one list does not affect another list's flag."
+  (let ((org-mode-google-tasks-sync-engine--sort-needed nil))
+    (org-mode-google-tasks-sync-engine--sort-needed-mark "L1")
+    (should (org-mode-google-tasks-sync-engine--sort-needed-p "L1"))
+    (should-not (org-mode-google-tasks-sync-engine--sort-needed-p "L2"))))
+
+;;; -- sort tripwire ----------------------------------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/sort-tripwire-aborts-and-warns ()
+  "When the sort budget is exceeded, the tripwire aborts the sort and
+raises a `display-warning' *error* without leaving the worker stuck.
+The diagnostic dump carries the stalling heading, pass count, and
+queue state so the user can debug the cycle."
+  (let ((warnings nil)
+        (org-mode-google-tasks-sync-sort-time-budget 0) ; trip immediately
+        (org-mode-google-tasks-sync-engine--pass-count 7)
+        (org-mode-google-tasks-sync-engine--running
+         (list 'incremental-sync 'incremental-sync nil nil 0.0))
+        (org-mode-google-tasks-sync-engine--queue
+         (list (list 'move "stuck-task" nil nil nil))))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type msg _level)
+                 (push msg warnings))))
+      (let ((file (make-temp-file "gtasks-tripwire" nil ".org")))
+        (unwind-protect
+            (progn
+              (with-temp-file file
+                (insert "* Inbox\n"
+                        "** TODO A\n"
+                        "   :PROPERTIES:\n"
+                        "   :GTASK_ID: a-id\n"
+                        "   :GTASK_LIST: L\n"
+                        "   :GTASK_POSITION: 01\n"
+                        "   :END:\n"
+                        "** TODO B\n"
+                        "   :PROPERTIES:\n"
+                        "   :GTASK_ID: b-id\n"
+                        "   :GTASK_LIST: L\n"
+                        "   :GTASK_POSITION: 02\n"
+                        "   :END:\n"))
+              (with-current-buffer (find-file-noselect file)
+                (save-excursion
+                  (goto-char (point-min))
+                  (re-search-forward "^\\* Inbox$")
+                  (let ((parent-marker (point-marker)))
+                    (org-mode-google-tasks-sync-engine--sort-with-budget
+                     parent-marker "L" file))))
+              ;; The tripwire fired exactly once (the recursion-entry
+              ;; check) and emitted a display-warning.
+              (should (= 1 (length warnings)))
+              (let ((msg (car warnings)))
+                (should (string-match "Sort exceeded" msg))
+                (should (string-match "pass: #7" msg))
+                (should (string-match "stuck-task" msg))))
+          (with-current-buffer (find-file-noselect file)
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer))
+          (delete-file file))))))
+
 ;;; org-mode-google-tasks-sync-engine-test.el ends here

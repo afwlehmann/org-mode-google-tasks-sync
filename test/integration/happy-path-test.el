@@ -37,16 +37,25 @@
 
 (defun org-mode-google-tasks-sync-integration-test--pump
     (&optional timeout)
-  "Pump the event loop until the engine returns to `idle' or TIMEOUT seconds.
+  "Pump the event loop until the action queue drains or TIMEOUT seconds.
 Default timeout is 30 seconds.  `plz' fires callbacks via the Emacs process
 event loop; in batch mode nothing pumps it automatically, so we must call
 `accept-process-output' repeatedly to let HTTP responses arrive and the
-engine's state machine advance through fetching -> applying -> idle."
+worker advance through the queue.  Under the action-queue model the
+engine returns to `idle' (no running item, empty queue) only when all
+enqueued work has finished; checking `--state' alone is not enough
+because `--state' is `idle' between enqueue and the worker's first
+`run-at-time' callback firing."
   (let ((deadline (+ (float-time) (or timeout 30))))
     (while (and (> deadline (float-time))
-                (not (eq org-mode-google-tasks-sync-engine--state 'idle)))
+                (or org-mode-google-tasks-sync-engine--running
+                    org-mode-google-tasks-sync-engine--queue
+                    org-mode-google-tasks-sync-engine--worker-scheduled
+                    (not (eq org-mode-google-tasks-sync-engine--state 'idle))))
       (accept-process-output nil 0.1)))
-  (should (eq org-mode-google-tasks-sync-engine--state 'idle)))
+  (should (eq org-mode-google-tasks-sync-engine--state 'idle))
+  (should (null org-mode-google-tasks-sync-engine--running))
+  (should (null org-mode-google-tasks-sync-engine--queue)))
 
 (defun org-mode-google-tasks-sync-integration-test--with-org-file
     (org-text &rest body)
@@ -82,6 +91,14 @@ Restores all overridden variables on exit."
           org-mode-google-tasks-sync-engine--token)
          (org-mode-google-tasks-sync-integration-test--saved-state
           org-mode-google-tasks-sync-engine--state)
+         (org-mode-google-tasks-sync-integration-test--saved-queue
+          org-mode-google-tasks-sync-engine--queue)
+         (org-mode-google-tasks-sync-integration-test--saved-running
+          org-mode-google-tasks-sync-engine--running)
+         (org-mode-google-tasks-sync-integration-test--saved-worker-scheduled
+          org-mode-google-tasks-sync-engine--worker-scheduled)
+         (org-mode-google-tasks-sync-integration-test--saved-sort-needed
+          org-mode-google-tasks-sync-engine--sort-needed)
          (org-mode-google-tasks-sync-integration-test--saved-last-sync
           org-mode-google-tasks-sync-engine--last-sync-time)
          (org-mode-google-tasks-sync-integration-test--saved-keep-done
@@ -96,8 +113,9 @@ Restores all overridden variables on exit."
                  org-mode-google-tasks-sync-integration--mockoon-token-url)
            (setq org-mode-google-tasks-sync-engine--token
                  (org-mode-google-tasks-sync-integration-test--fake-token))
-           (setq org-mode-google-tasks-sync-engine--state 'idle)
-           (setq org-mode-google-tasks-sync-engine--last-sync-time nil)
+            (setq org-mode-google-tasks-sync-engine--state 'idle)
+            (org-mode-google-tasks-sync-engine--queue-reset)
+            (setq org-mode-google-tasks-sync-engine--last-sync-time nil)
            (setq org-mode-google-tasks-sync-keep-done-items t)
            (setq org-mode-google-tasks-sync-persist-trash nil)
            (setq org-mode-google-tasks-sync-map
@@ -113,10 +131,18 @@ Restores all overridden variables on exit."
              org-mode-google-tasks-sync-integration-test--saved-map)
        (setq org-mode-google-tasks-sync-engine--token
              org-mode-google-tasks-sync-integration-test--saved-token)
-       (setq org-mode-google-tasks-sync-engine--state
-             org-mode-google-tasks-sync-integration-test--saved-state)
-       (setq org-mode-google-tasks-sync-engine--last-sync-time
-             org-mode-google-tasks-sync-integration-test--saved-last-sync)
+        (setq org-mode-google-tasks-sync-engine--state
+              org-mode-google-tasks-sync-integration-test--saved-state)
+        (setq org-mode-google-tasks-sync-engine--queue
+              org-mode-google-tasks-sync-integration-test--saved-queue)
+        (setq org-mode-google-tasks-sync-engine--running
+              org-mode-google-tasks-sync-integration-test--saved-running)
+        (setq org-mode-google-tasks-sync-engine--worker-scheduled
+              org-mode-google-tasks-sync-integration-test--saved-worker-scheduled)
+        (setq org-mode-google-tasks-sync-engine--sort-needed
+              org-mode-google-tasks-sync-integration-test--saved-sort-needed)
+        (setq org-mode-google-tasks-sync-engine--last-sync-time
+              org-mode-google-tasks-sync-integration-test--saved-last-sync)
        (setq org-mode-google-tasks-sync-keep-done-items
              org-mode-google-tasks-sync-integration-test--saved-keep-done)
        (setq org-mode-google-tasks-sync-persist-trash

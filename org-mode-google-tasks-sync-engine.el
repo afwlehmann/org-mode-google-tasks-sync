@@ -42,21 +42,44 @@ engine can reference it without a circular require.")
   "*Google Tasks Conflicts*")
 
 (defcustom org-mode-google-tasks-sync-fetch-timeout 300
-  "Seconds after which a sync in flight is considered hung.
-When this many seconds pass between entering the `fetching' state
-and returning to `idle', the engine forcibly resets state so the
-next tick can try again.  Bump this if you have many lists or a
-slow network and healthy syncs are being treated as hung."
+  "Seconds after which a sync item is considered hung.
+When this many seconds pass between an item starting and finishing,
+the worker forcibly drops it so the next item can run.  Bump this if
+you have many lists or a slow network and healthy syncs are being
+treated as hung."
+  :type 'integer
+  :group 'org-mode-google-tasks-sync)
+
+(defcustom org-mode-google-tasks-sync-action-timeout 30
+  "Seconds after which a `move' or `delete' item is considered hung.
+Shorter than `org-mode-google-tasks-sync-fetch-timeout' because
+interactive actions should feel snappy; a stalled move/delete is
+almost certainly a network problem, not a large workload."
+  :type 'integer
+  :group 'org-mode-google-tasks-sync)
+
+(defcustom org-mode-google-tasks-sync-sort-time-budget 5
+  "Wall-clock budget in seconds for the post-apply children sort.
+The sort path is synchronous CPU-bound work and historically hung
+Emacs at the \"Sorting entries...\" message when a cycle formed.
+When the budget is exceeded the sort is aborted: a `display-warning'
+*error* is raised with diagnostic context, the remaining sorts are
+skipped, but the sync item still stamps, saves, and completes so the
+worker advances instead of parking forever.  Bump this if you have a
+genuinely large list (thousands of tasks) and the tripwire fires on
+healthy sorts."
   :type 'integer
   :group 'org-mode-google-tasks-sync)
 
 (defvar org-mode-google-tasks-sync-engine--state 'idle
-  "Current sync state.  One of idle, fetching, applying, pushing.")
+  "Derived view of the worker state, kept for log/test compatibility.
+One of `idle', `fetching', `applying'.  The action queue
+\(`--queue' / `--running') is the source of truth; this variable
+mirrors it so existing tests and log lines keep working.  `idle'
+means no item is running and the queue is empty.")
 
 (defvar org-mode-google-tasks-sync-engine--timeout-timer nil
-  "Timer that resets state if a sync hangs.
-Resets when a sync hangs past
-`org-mode-google-tasks-sync-fetch-timeout'.")
+  "Timer that drops the running item if it hangs past its budget.")
 
 (defvar org-mode-google-tasks-sync-engine--last-sync-time nil
   "`float-time' of the last sync that reached `idle' again.
@@ -71,6 +94,43 @@ The entry-point's `after-save-hook' checks this and skips its work
 when set, so the engine's own buffer save doesn't kick off another
 sync in 1 second (which would itself save, which would trigger
 the hook again — a 1-Hz loop).")
+
+(defvar org-mode-google-tasks-sync-engine--queue nil
+  "Pending action items, priority-ordered FIFO within a class.
+Each item is a list: (TYPE KEY PAYLOAD HANDLER STARTED-AT).  TYPE is
+one of `move', `delete', `incremental-sync', `full-sync'.  KEY is
+the dedup key (task-id for `move'/`delete', the symbol otherwise).
+HANDLER is a function of one arg DONE-CALLBACK.  STARTED-AT is set
+when the worker picks the item up, nil while queued.")
+
+(defvar org-mode-google-tasks-sync-engine--running nil
+  "The item currently being processed by the worker, or nil.
+An empty `--queue' plus this being nil means the worker is idle.")
+
+(defvar org-mode-google-tasks-sync-engine--worker-scheduled nil
+  "Non-nil while a `worker-step' is pending via `run-at-time'.
+Prevents double-scheduling when several items enqueue in the same
+event-loop tick.")
+
+(defvar org-mode-google-tasks-sync-engine--sort-needed nil
+  "Alist (LIST-ID . t) of lists whose next sync tail must sort.
+Set by the four position-writing producers (pull write,
+`--finalize-push-new', `--write-move-result', drift/tie callbacks)
+during a pass so `--finalize-apply' can skip the sort on no-op ticks.
+Cleared at the start of each sync item for the lists it owns.")
+
+(defvar org-mode-google-tasks-sync-engine--pass-count 0
+  "Monotonic counter of sync passes started this session.
+Used by the sort tripwire's diagnostic dump to indicate whether
+sorts fire every pass (a convergence-failure smell).")
+
+(put 'org-mode-google-tasks-sync-engine--queue 'safe-local-variable t)
+
+(define-error 'org-mode-google-tasks-sync-sort-timeout
+  "Sort exceeded `org-mode-google-tasks-sync-sort-time-budget'.
+Raised inside `--with-sort-budget' to abort a hanging children sort
+without wedging the worker.  Caught by `--finalize-apply' which logs
+and skips the remaining sorts.")
 
 (defun org-mode-google-tasks-sync-engine-log-buffer ()
   "Return (creating if needed) the log buffer."
@@ -243,60 +303,92 @@ past its expiry is replaced by a fresh one from auth-source."
               (org-mode-google-tasks-sync-oauth-make-token)))))
 
 (defun org-mode-google-tasks-sync-engine-run (mode)
-  "Run a sync pass.  MODE is `incremental' or `full'."
-  (cond
-   ((not (eq org-mode-google-tasks-sync-engine--state 'idle))
-    (org-mode-google-tasks-sync-engine--log "Skip tick: sync in flight (state=%s)"
-                                       org-mode-google-tasks-sync-engine--state))
-   ((not (bound-and-true-p org-mode-google-tasks-sync-map))
+  "Enqueue a sync pass.  MODE is `incremental' or `full'.
+The pass runs on the action queue once the worker drains any
+higher-priority (interactive) items ahead of it.  Returns
+immediately; coalesces with an already-pending or running sync of
+the same MODE so repeated ticks/after-save triggers don't pile up."
+  (unless (bound-and-true-p org-mode-google-tasks-sync-map)
     (org-mode-google-tasks-sync-engine--log
-     "No lists configured (org-mode-google-tasks-sync-map empty)"))
-   (t
-    ;; Fetch the token BEFORE transitioning to `fetching'.  This is the
-    ;; only synchronous step that can throw (e.g. EasyPG can't find gpg),
-    ;; and we don't want a failure here to leave the state machine stuck
-    ;; at `fetching' forever — that would make every subsequent tick
-    ;; take the `Skip tick: sync in flight' early-return.
-    (let ((token (org-mode-google-tasks-sync-engine--token))
-          (entries org-mode-google-tasks-sync-map))
-      (setq org-mode-google-tasks-sync-engine--state 'fetching)
-      (setq org-mode-google-tasks-sync-engine--last-sync-time (float-time))
-      (org-mode-google-tasks-sync-engine--arm-timeout)
-      ;; We don't log "Begin sync" here — most ticks finish with no actual
-      ;; pull/push activity, and a per-cycle "begin"/"complete" pair drowns
-      ;; the log.  Per-action lines below (Pushed, Pulled, Deleted, …) are
-      ;; the actual signal.
-      (org-mode-google-tasks-sync-engine--sync-next entries token mode)))))
+     "No lists configured (org-mode-google-tasks-sync-map empty)")
+    (cl-return-from org-mode-google-tasks-sync-engine-run))
+  (let ((type (if (eq mode 'full) 'full-sync 'incremental-sync)))
+    (org-mode-google-tasks-sync-engine--enqueue
+     type type
+     (lambda (done)
+       (org-mode-google-tasks-sync-engine--run-sync-pass mode done))
+     (if (eq type 'full-sync)
+         org-mode-google-tasks-sync-fetch-timeout
+       org-mode-google-tasks-sync-fetch-timeout))))
 
-(defun org-mode-google-tasks-sync-engine--arm-timeout ()
-  "Arm the hung-sync timeout."
+(defun org-mode-google-tasks-sync-engine--run-sync-pass (mode done)
+  "Run one sync pass of MODE, calling DONE when the pass finishes.
+Fetches the token before transitioning to `fetching' so a token
+error (e.g. EasyPG can't find gpg) doesn't leave the worker stuck;
+instead the item completes with state left at `idle'."
+  (condition-case err
+      (let ((token (org-mode-google-tasks-sync-engine--token)))
+        (setq org-mode-google-tasks-sync-engine--state 'fetching)
+        (setq org-mode-google-tasks-sync-engine--last-sync-time (float-time))
+        (setq org-mode-google-tasks-sync-engine--pass-count
+              (1+ org-mode-google-tasks-sync-engine--pass-count))
+        (org-mode-google-tasks-sync-engine--log-debug
+         "PASS #%d begin (%s) for %d lists"
+         org-mode-google-tasks-sync-engine--pass-count
+         mode (length org-mode-google-tasks-sync-map))
+        ;; Reset the sort-needed flags for the lists this pass owns so
+        ;; the gating decision reflects this pass's writes, not a
+        ;; previous pass's leftovers.
+        (dolist (entry org-mode-google-tasks-sync-map)
+          (org-mode-google-tasks-sync-engine--sort-needed-clear (car entry)))
+        (org-mode-google-tasks-sync-engine--sync-next
+         org-mode-google-tasks-sync-map token mode done))
+    (error
+     (org-mode-google-tasks-sync-engine--log
+      "Sync pass failed before fetch: %S" err)
+     (setq org-mode-google-tasks-sync-engine--state 'idle)
+     (funcall done))))
+
+(defun org-mode-google-tasks-sync-engine--arm-timeout (budget)
+  "Arm the hung-item timeout to fire after BUDGET seconds."
   (when org-mode-google-tasks-sync-engine--timeout-timer
     (cancel-timer org-mode-google-tasks-sync-engine--timeout-timer))
   (setq org-mode-google-tasks-sync-engine--timeout-timer
-        (run-at-time org-mode-google-tasks-sync-fetch-timeout nil
+        (run-at-time budget nil
                      #'org-mode-google-tasks-sync-engine--on-timeout)))
 
 (defun org-mode-google-tasks-sync-engine--cancel-timeout ()
-  "Cancel any in-flight hung-sync timer."
+  "Cancel any in-flight hung-item timer."
   (when org-mode-google-tasks-sync-engine--timeout-timer
     (cancel-timer org-mode-google-tasks-sync-engine--timeout-timer)
     (setq org-mode-google-tasks-sync-engine--timeout-timer nil)))
 
 (defun org-mode-google-tasks-sync-engine--on-timeout ()
-  "Called when a sync hangs past `org-mode-google-tasks-sync-fetch-timeout'.
-Resets state so the next tick can try again.  Stale plz callbacks
-may still fire afterwards; they'll be effectively no-ops on the
-state machine because state has already moved back to `idle'."
+  "Called when the running item exceeds its budget.
+Drops the item so the worker advances.  Stale plz callbacks may
+still fire afterwards; they're effectively no-ops because the
+worker has already moved on."
   (setq org-mode-google-tasks-sync-engine--timeout-timer nil)
-  (when (not (eq org-mode-google-tasks-sync-engine--state 'idle))
-    (org-mode-google-tasks-sync-engine--log
-     "Sync hung past %ss in state=%s; resetting to idle"
-     org-mode-google-tasks-sync-fetch-timeout
-     org-mode-google-tasks-sync-engine--state)
-    (setq org-mode-google-tasks-sync-engine--state 'idle)))
+  (when org-mode-google-tasks-sync-engine--running
+    (let* ((item org-mode-google-tasks-sync-engine--running)
+           (type (car item))
+           (key (cadr item))
+           (started (car (cddddr item)))
+           (elapsed (if started (- (float-time) started) 0)))
+      (org-mode-google-tasks-sync-engine--log
+       "TIMEOUT %s (elapsed=%ds, key=%S)"
+       (if (memq type '(incremental-sync full-sync)) "sync" type)
+       (round elapsed) key)
+      ;; Drop the item and step the worker.  Keep `--state' sane for
+      ;; a sync item that died mid-pass.
+      (when (memq type '(incremental-sync full-sync))
+        (setq org-mode-google-tasks-sync-engine--state 'idle))
+      (setq org-mode-google-tasks-sync-engine--running nil)
+      (org-mode-google-tasks-sync-engine--worker-step))))
 
-(defun org-mode-google-tasks-sync-engine--sync-next (entries token mode)
-  "Drive sync sequentially over ENTRIES using TOKEN in MODE."
+(defun org-mode-google-tasks-sync-engine--sync-next (entries token mode done)
+  "Drive sync sequentially over ENTRIES using TOKEN in MODE.
+Calls DONE when all entries have finished (success or failure)."
   (if (null entries)
       (progn
         (setq org-mode-google-tasks-sync-engine--state 'idle)
@@ -304,14 +396,15 @@ state machine because state has already moved back to `idle'."
         ;; predicate sees mtime <= last-sync-time on the next round
         ;; and doesn't re-fire on our own writes.
         (setq org-mode-google-tasks-sync-engine--last-sync-time (float-time))
-        (org-mode-google-tasks-sync-engine--cancel-timeout))
+        (funcall done))
     (let* ((entry (car entries))
            (list-id (car entry))
            (file (car (cdr entry)))
            (parent (cdr (cdr entry))))
       (org-mode-google-tasks-sync-engine--sync-one
        token list-id file parent mode
-       (lambda () (org-mode-google-tasks-sync-engine--sync-next (cdr entries) token mode))))))
+       (lambda () (org-mode-google-tasks-sync-engine--sync-next
+              (cdr entries) token mode done))))))
 
 (defun org-mode-google-tasks-sync-engine--sync-one (token list-id file parent mode done)
   "Sync one list end-to-end using TOKEN in LIST-ID from FILE.
@@ -347,6 +440,211 @@ MODE is `incremental' or `full'.  Calls DONE when finished."
       (lambda (err)
         (org-mode-google-tasks-sync-engine--log "Fetch error for list %s: %S" list-id err)
         (funcall done)))))
+
+;;; -- action queue & worker ---------------------------------------------------
+;;
+;; A single main-thread worker processes one action at a time: an
+;; interactive `move'/`delete' or a background `incremental-sync'/
+;; `full-sync' pass.  Items are deduplicated by their KEY (task-id for
+;; move/delete, the type symbol for syncs), with a newer move of the
+;; same task replacing an already-queued one.  The worker is lazily
+;; scheduled via `run-at-time 0' on first enqueue and dies when the
+;; queue drains; exactly one worker instance exists at any time by
+;; construction (Emacs is single-threaded and `--worker-scheduled'
+;; guards double-scheduling).
+;;
+;; This serializes the previously ad-hoc fire-and-forget paths: the
+;; post-apply `--sort-children' inside a sync can no longer race with
+;; an interactive `tasks.move' advice, because moves run as their own
+;; items ahead of (or after) any running sync.  Repeated tick/after-save
+;; triggers collapse into one pending sync item rather than being
+;; dropped (the old drop-on-busy tick gate) or piling up.
+
+(defconst org-mode-google-tasks-sync-engine--item-priorities
+  '((move             . 1)
+    (delete           . 1)
+    (incremental-sync . 2)
+    (full-sync        . 3))
+  "Priority class per item TYPE, lower number = higher priority.
+Interactive items (move/delete) jump the queue ahead of background
+syncs so a user keystroke isn't blocked behind a 300-item full sync.
+Priority only orders the pending queue; a running item is never
+preempted (it has its own per-item timeout instead).")
+
+(defun org-mode-google-tasks-sync-engine--item-priority (type)
+  "Return the priority class number for item TYPE."
+  (or (alist-get type org-mode-google-tasks-sync-engine--item-priorities)
+      99))
+
+(defun org-mode-google-tasks-sync-engine--enqueue (type key handler &optional timeout)
+  "Add an action item (TYPE KEY HANDLER) to the queue, then pump the worker.
+KEY is the dedup key.  HANDLER takes one arg, a DONE callback.
+TIMEOUT, when given, overrides the type default budget for the
+hung-item timer.  Dedup semantics:
+- For `move': a queued `move' with the same KEY is replaced by the
+  new one (the user kept pressing M-<down>; only the latest target
+  matters and params are recomputed at run time anyway).
+- For `delete': items with the same KEY are not coalesced (a second
+  delete of an already-queued task is dropped as a no-op).
+- For sync types: a queued or running item of the same type is
+  merged — repeated triggers don't pile up."
+  (let ((existing (org-mode-google-tasks-sync-engine--find-item type key)))
+    (cond
+     ;; Running sync of the same type: merge (the running pass already
+     ;; covers whatever the new trigger wants).
+     ((and existing (eq existing 'running))
+      (org-mode-google-tasks-sync-engine--log-debug
+       "MERGED %s key=%S (already running)" type key))
+     ;; Queued item with the same key.
+     (existing
+      (if (eq type 'move)
+          (progn
+            (org-mode-google-tasks-sync-engine--replace-item type key handler)
+            (org-mode-google-tasks-sync-engine--log-debug
+             "REPLACE move key=%S (newer request)" key))
+        (org-mode-google-tasks-sync-engine--log-debug
+         "MERGED %s key=%S (already queued)" type key)))
+     (t
+      (let ((item (list type key handler timeout nil)))
+        (setq org-mode-google-tasks-sync-engine--queue
+              (org-mode-google-tasks-sync-engine--insert-ordered item))
+        (org-mode-google-tasks-sync-engine--log-debug
+         "ENQUEUE %s key=%S (queue-depth=%d)"
+         type key (length org-mode-google-tasks-sync-engine--queue)))))
+    (org-mode-google-tasks-sync-engine--schedule-worker)))
+
+(defun org-mode-google-tasks-sync-engine--find-item (type key)
+  "Return `running' if a matching item of TYPE is running, the queued item, or nil.
+A move matches only against other moves; sync types match only
+their own type.  KEY is compared with `equal'."
+  (let ((running org-mode-google-tasks-sync-engine--running))
+    (cond
+     ((and running (eq (car running) type)
+           (equal (cadr running) key))
+      'running)
+     (t
+      (cl-find-if
+       (lambda (item)
+         (and (eq (car item) type) (equal (cadr item) key)))
+       org-mode-google-tasks-sync-engine--queue)))))
+
+(defun org-mode-google-tasks-sync-engine--replace-item (type key handler)
+  "Replace a queued item of TYPE/KEY with HANDLER (used for newer move requests)."
+  (setq org-mode-google-tasks-sync-engine--queue
+        (cl-mapcar
+         (lambda (item)
+           (if (and (eq (car item) type) (equal (cadr item) key))
+               (list type key handler (cadddr item) nil)
+             item))
+         org-mode-google-tasks-sync-engine--queue)))
+
+(defun org-mode-google-tasks-sync-engine--insert-ordered (item)
+  "Return a new queue with ITEM inserted at its priority slot (FIFO within class).
+Lower priority number = higher priority; a higher-priority item jumps
+ahead of lower-priority items already queued, but equal-priority
+items keep FIFO order (a move enqueued after another move of a
+different task runs after it, not before)."
+  (let ((p (org-mode-google-tasks-sync-engine--item-priority (car item))))
+    (if (or (null org-mode-google-tasks-sync-engine--queue)
+            (< p (org-mode-google-tasks-sync-engine--item-priority
+                  (caar org-mode-google-tasks-sync-engine--queue))))
+        (cons item org-mode-google-tasks-sync-engine--queue)
+      ;; Stable insert: keep existing order, append after all
+      ;; strictly-higher-priority items already queued (equal priority
+      ;; stays FIFO).
+      (let ((tail org-mode-google-tasks-sync-engine--queue)
+            (acc nil))
+        ;; Walk past strictly-higher-priority (lower number) AND
+        ;; equal-priority items so equal-priority inserts stay FIFO.
+        (while (and tail
+                    (<= (org-mode-google-tasks-sync-engine--item-priority (caar tail))
+                        p))
+          (push (car tail) acc)
+          (setq tail (cdr tail)))
+        (nconc (nreverse acc) (list item) tail)))))
+
+(defun org-mode-google-tasks-sync-engine--schedule-worker ()
+  "Run the worker once on the next event-loop tick when idle."
+  (unless (or org-mode-google-tasks-sync-engine--running
+              org-mode-google-tasks-sync-engine--worker-scheduled)
+    (setq org-mode-google-tasks-sync-engine--worker-scheduled t)
+    (run-at-time 0 nil #'org-mode-google-tasks-sync-engine--worker-step)))
+
+(defun org-mode-google-tasks-sync-engine--worker-step ()
+  "Pop the next queue item and run it, or go idle when the queue is empty."
+  (setq org-mode-google-tasks-sync-engine--worker-scheduled nil)
+  (if org-mode-google-tasks-sync-engine--running
+      ;; A timeout already advanced the worker; re-scheduling while
+      ;; the previous item is still in flight is a no-op.
+      nil
+    (if (null org-mode-google-tasks-sync-engine--queue)
+        (setq org-mode-google-tasks-sync-engine--state 'idle)
+      (let ((item (pop org-mode-google-tasks-sync-engine--queue)))
+        (setf (nthcdr 4 item) (list (float-time)))
+        (setq org-mode-google-tasks-sync-engine--running item)
+        (let* ((type (car item))
+               (handler (caddr item))
+               (timeout (or (cadddr item)
+                            (if (memq type '(incremental-sync full-sync))
+                                org-mode-google-tasks-sync-fetch-timeout
+                              org-mode-google-tasks-sync-action-timeout)))
+               (done
+                (lambda ()
+                  (org-mode-google-tasks-sync-engine--item-done item))))
+          (org-mode-google-tasks-sync-engine--log-debug
+           "START %s key=%S" type (cadr item))
+          (org-mode-google-tasks-sync-engine--arm-timeout timeout)
+          (condition-case err
+              (funcall handler done)
+            (error
+             (org-mode-google-tasks-sync-engine--log
+              "Item handler threw before completing: %s %S" type err)
+             (funcall done))))))))
+
+(defun org-mode-google-tasks-sync-engine--item-done (item)
+  "Mark ITEM finished and step the worker to the next pending item."
+  (when (eq item org-mode-google-tasks-sync-engine--running)
+    (org-mode-google-tasks-sync-engine--log-debug
+     "DONE %s key=%S" (car item) (cadr item))
+    (setq org-mode-google-tasks-sync-engine--running nil)
+    (org-mode-google-tasks-sync-engine--cancel-timeout)
+    (when (memq (car item) '(incremental-sync full-sync))
+      (setq org-mode-google-tasks-sync-engine--state 'idle))
+    (org-mode-google-tasks-sync-engine--worker-step)))
+
+(defun org-mode-google-tasks-sync-engine--queue-reset ()
+  "Drop the queue and running item.  Use from test code and `--disable'."
+  (setq org-mode-google-tasks-sync-engine--queue nil
+        org-mode-google-tasks-sync-engine--running nil
+        org-mode-google-tasks-sync-engine--worker-scheduled nil
+        org-mode-google-tasks-sync-engine--state 'idle))
+
+(defun org-mode-google-tasks-sync-engine--queue-pending-p (type)
+  "Return non-nil if a TYPE item is queued or running."
+  (or (and org-mode-google-tasks-sync-engine--running
+           (eq (car org-mode-google-tasks-sync-engine--running) type))
+      (cl-some (lambda (item) (eq (car item) type))
+               org-mode-google-tasks-sync-engine--queue)))
+
+;;; -- sort-needed gating ------------------------------------------------------
+
+(defun org-mode-google-tasks-sync-engine--sort-needed-mark (list-id)
+  "Record that LIST-ID's next sync tail must sort.
+Called by the position-writing producers (pull write,
+`--finalize-push-new', `--write-move-result', drift/tie callbacks)
+during a pass so `--finalize-apply' can skip the sort on no-op ticks."
+  (when list-id
+    (setf (alist-get list-id org-mode-google-tasks-sync-engine--sort-needed)
+          t)))
+
+(defun org-mode-google-tasks-sync-engine--sort-needed-p (list-id)
+  "Return non-nil when LIST-ID was marked for sorting this pass."
+  (and list-id (cdr (assoc list-id org-mode-google-tasks-sync-engine--sort-needed))))
+
+(defun org-mode-google-tasks-sync-engine--sort-needed-clear (list-id)
+  "Clear the sort-needed flag for LIST-ID."
+  (setq org-mode-google-tasks-sync-engine--sort-needed
+        (assoc-delete-all list-id org-mode-google-tasks-sync-engine--sort-needed)))
 
 (defun org-mode-google-tasks-sync-engine--last-sync (file)
   "Read the #+GTASKS_LAST_SYNC keyword from FILE, or nil."
@@ -390,7 +688,13 @@ is the curl process buffer.  The sort+save is wrapped in
       (lambda ()
         (with-current-buffer (find-file-noselect file)
           (org-save-outline-visibility nil
-            (org-mode-google-tasks-sync-engine--sort-children parent-marker)
+            ;; Gated sort: skip the synchronous sort path on no-op
+            ;; ticks (the four position-writing producers didn't fire
+            ;; this pass).  Shrinks the exposure window for a hang and
+            ;; saves CPU on quiet ticks.
+            (when (org-mode-google-tasks-sync-engine--sort-needed-p list-id)
+              (org-mode-google-tasks-sync-engine--sort-with-budget
+               parent-marker list-id file))
             (org-mode-google-tasks-sync-engine--set-last-sync
              file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
             (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
@@ -554,6 +858,79 @@ nil or points at no heading."
         (when (org-at-heading-p)
           (org-mode-google-tasks-sync-engine--sort-subtree-at-point))))))
 
+(defvar org-mode-google-tasks-sync-engine--sort-deadline nil
+  "Wall-clock deadline for the current sort, or nil when no budget is set.
+Bound by `--sort-with-budget' and checked at each recursion level of
+`--sort-subtree-at-point'.  Buffer-local so concurrent syncs of
+different files don't share a deadline.")
+
+(defun org-mode-google-tasks-sync-engine--sort-with-budget (parent-marker list-id file)
+  "Run `--sort-children' under a wall-clock budget, aborting on timeout.
+PARENT-MARKER locates the subtree to sort.  LIST-ID and FILE appear
+in the diagnostic `display-warning' when the budget is exceeded.
+The sort is wrapped so a hanging sort (the cycle that historically
+froze Emacs at \"Sorting entries...\") aborts cleanly: the warning
+surfaces, the remaining sorts are skipped, but the sync item still
+stamps, saves, and completes — the worker advances instead of
+parking forever."
+  (let ((org-mode-google-tasks-sync-engine--sort-deadline
+         (+ (float-time) org-mode-google-tasks-sync-sort-time-budget)))
+    (condition-case _err
+        (org-mode-google-tasks-sync-engine--sort-children parent-marker)
+      (org-mode-google-tasks-sync-sort-timeout
+       ;; The recursion-entry check already raised the
+       ;; `display-warning'; here we just ensure the sync tail
+       ;; continues (stamp, save) so the worker advances.
+       (org-mode-google-tasks-sync-engine--log
+        "Sort aborted after exceeding %ds budget for list %S file %S (set `org-mode-google-tasks-sync-sort-time-budget' to raise it)"
+        org-mode-google-tasks-sync-sort-time-budget list-id file)))))
+
+(defun org-mode-google-tasks-sync-engine--sort-tripwire-here
+    (title id where &optional start file list-id)
+  "Emit the always-on `display-warning' for a sort trip, plus a log line.
+TITLE and ID identify the heading the sort stalled at (or nil).
+WHERE is a short label for which check fired.  START, FILE and
+LIST-ID, when given, add elapsed time and file/list context to the
+diagnostic.  The warning is `:error' severity so it can't be missed
+mid-hang and carries the cycle-indicator context the user needs to
+debug the root cause."
+  (let* ((elapsed (if start (- (float-time) start) 0))
+         (budget org-mode-google-tasks-sync-sort-time-budget)
+         (running org-mode-google-tasks-sync-engine--running)
+         (queue (mapcar (lambda (i) (list (car i) (cadr i)))
+                        org-mode-google-tasks-sync-engine--queue))
+         (pass org-mode-google-tasks-sync-engine--pass-count)
+         (msg
+          (format-message
+           (concat "Sort exceeded the %ds budget (set "
+                   "`org-mode-google-tasks-sync-sort-time-budget' to raise it).\n"
+                   "  stalled at: %S  (GTASK_ID=%S)\n"
+                   "  check: %S\n"
+                   "  elapsed: %ds\n"
+                   "  file: %S\n  list-id: %S\n"
+                   "  pass: #%d\n"
+                   "  running item: %S\n"
+                   "  pending queue: %S\n\n"
+                   "Likely causes:\n"
+                   "  - a position-repair / drift-resolution cycle "
+                   "(check the log for repeated `tasks.move' lines)\n"
+                   "  - a content-hash flap pulling the same task every "
+                   "pass (check the log for repeated `Pulled')\n"
+                   "  - a genuinely large list (raise the budget)\n\n"
+                   "The remaining sorts were skipped; the sync still "
+                   "saved and completed.  See *org-mode-google-tasks-sync-log* "
+                   "(set `org-mode-google-tasks-sync-log-level' to `debug' "
+                   "for queue chatter).")
+           budget
+           (or title "<unknown>") (or id "<none>")
+           where elapsed
+           (or file "<unknown>") (or list-id "<unknown>")
+           pass
+           (and running (list (car running) (cadr running)))
+           queue)))
+    (display-warning 'org-mode-google-tasks-sync-sort msg :error)
+    (org-mode-google-tasks-sync-engine--log "SORT ABORTED: %s" msg)))
+
 (defun org-mode-google-tasks-sync-engine--collect-tie-pairs (parent-marker)
   "Return (ID . PREV-ID) pairs for synced siblings with duplicate positions.
 Walks direct synced children of PARENT-MARKER in buffer order, then
@@ -667,7 +1044,19 @@ caller's `current-buffer' is a plz curl buffer.  Falls back to
               (goto-char marker)
               (org-back-to-heading t)
               (org-entry-put nil org-mode-google-tasks-sync-org--prop-position
-                             position))))))))
+                             position)))
+          ;; Position changed this pass → the sync tail must sort.
+          (org-mode-google-tasks-sync-engine--sort-needed-mark
+           (org-mode-google-tasks-sync-engine--list-id-for-file search-file)))))))
+
+(defun org-mode-google-tasks-sync-engine--list-id-for-file (file)
+  "Return the list-id whose `--map' entry matches FILE, or nil."
+  (let ((abs (and file (file-truename file))))
+    (cl-some
+     (lambda (entry)
+       (when (and abs (string= abs (file-truename (car (cdr entry)))))
+         (car entry)))
+     org-mode-google-tasks-sync-map)))
 
 ;;; -- reorder drift detection (B1) -------------------------------------------
 ;;
@@ -822,6 +1211,24 @@ non-nil when point ended on a heading, nil otherwise."
 (defun org-mode-google-tasks-sync-engine--sort-subtree-at-point ()
   "Sort the children of the heading at point, then recurse into each child.
 Children are sorted by `--task-sort-key' / `--compare-tasks'."
+  ;; Sort tripwire: when `--sort-deadline' is set (we're inside
+  ;; `--sort-with-budget'), bail out before doing more work once the
+  ;; budget is exceeded.  The check is cheap and runs at each recursion
+  ;; level so a hung sort aborts in O(1) extra time, not after the
+  ;; current subtree finishes.
+  (when (and org-mode-google-tasks-sync-engine--sort-deadline
+             (> (float-time) org-mode-google-tasks-sync-engine--sort-deadline))
+    (let ((here-title
+           (condition-case nil
+               (or (org-element-property :raw-value (org-element-at-point))
+                   "<no heading>")
+             (error "<no heading>")))
+          (here-id (condition-case nil (org-entry-get nil "GTASK_ID")
+                     (error nil))))
+      (org-mode-google-tasks-sync-engine--sort-tripwire-here
+       here-title here-id "recursion entry")
+      (signal 'org-mode-google-tasks-sync-sort-timeout
+              (list here-title here-id))))
   (condition-case err
       (progn
         (org-sort-entries nil ?f
@@ -844,6 +1251,11 @@ Children are sorted by `--task-sort-key' / `--compare-tasks'."
                   (org-mode-google-tasks-sync-engine--sort-subtree-at-point)
                   (when (org-mode-google-tasks-sync-engine--back-to-heading-safe)
                     (forward-line 1))))))))
+    (org-mode-google-tasks-sync-sort-timeout
+     ;; The recursion-entry check already raised the
+     ;; `display-warning'; swallow here so the recursion unwinds
+     ;; cleanly and the sync tail continues.
+     nil)
     (error
      (org-mode-google-tasks-sync-engine--log
       "Sort skipped: %S" err))))
@@ -1192,13 +1604,17 @@ the buffer naturally.  Returns non-nil when the write ran."
             (let ((actual (org-element-property
                            :raw-value (org-element-at-point))))
               (if (equal actual title)
-                  (progn
-                    (org-mode-google-tasks-sync-org-write-task task)
-                    t)
-                (org-mode-google-tasks-sync-engine--log
-                 "WARN: marker detached for %S; heading at marker is %S; skipping in-place write"
-                 title actual)
-                nil))))
+                   (progn
+                     (org-mode-google-tasks-sync-org-write-task task)
+                     ;; A pull/push wrote the heading (incl. position),
+                     ;; so the sync tail must sort this pass.
+                     (org-mode-google-tasks-sync-engine--sort-needed-mark
+                      (org-mode-google-tasks-sync-org-task-list-id task))
+                     t)
+                 (org-mode-google-tasks-sync-engine--log
+                  "WARN: marker detached for %S; heading at marker is %S; skipping in-place write"
+                  title actual)
+                 nil))))
       (org-mode-google-tasks-sync-engine--log
        "WARN: no live marker for %S; skipping in-place write"
        title)
