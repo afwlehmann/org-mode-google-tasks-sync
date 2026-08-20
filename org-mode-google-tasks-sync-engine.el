@@ -698,8 +698,50 @@ is the curl process buffer.  The sort+save is wrapped in
             (org-mode-google-tasks-sync-engine--set-last-sync
              file (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t))
             (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
-              (save-buffer)))
-          (funcall done)))))))
+               (save-buffer)))
+           (funcall done)))))))
+
+(defun org-mode-google-tasks-sync-engine--collect-content-dupes (local-tasks)
+  "Return the shadowed headings from LOCAL-TASKS grouped by canonical hash.
+LOCAL-TASKS is the list collected by `--apply' (all synced headings
+up to 2 levels deep).  Headings without a GTASK_ID are skipped
+\(they're new-task headings the push path owns).  The canonical
+hash is *computed* from the task struct (title, notes, status,
+due) via `org-mode-google-tasks-sync-org-canonical-hash', not
+read from the stored :GTASK_CONTENT_HASH: property — the
+property may be stale or a placeholder, and deduping on a stale
+value would remove genuinely different headings that happen to
+share a stored hash.  For each content-hash group with more than
+one member, the keeper is the member with the newest
+:GTASK_UPDATED: (last heading in buffer order wins ties,
+mirroring `puthash' semantics in the ID-dedup); all other
+members are returned as shadows for the caller to delete.
+Returns a fresh list; does not mutate LOCAL-TASKS."
+  (let ((groups (make-hash-table :test 'equal)))
+    (dolist (task local-tasks)
+      (when (org-mode-google-tasks-sync-org-task-id task)
+        (let ((hash (org-mode-google-tasks-sync-org-canonical-hash task)))
+          (push task (gethash hash groups nil)))))
+    (let (shadows)
+      (maphash
+       (lambda (_hash members)
+         (when (cdr members)
+           ;; `members' is in reverse buffer order (we pushed).  Pick
+           ;; the keeper: newest by :GTASK_UPDATED:, ties broken by
+           ;; last-in-buffer (the head of `members').  The rest are
+           ;; shadows.
+           (let* ((winner (car members))
+                  (winner-updated (org-mode-google-tasks-sync-org-task-updated winner)))
+             (dolist (m (cdr members))
+               (let ((mu (org-mode-google-tasks-sync-org-task-updated m)))
+                 (when (and mu winner-updated (string> mu winner-updated))
+                   (setq winner m
+                         winner-updated mu))))
+             (dolist (m members)
+               (unless (eq m winner)
+                 (push m shadows))))))
+       groups)
+      shadows)))
 
 (defun org-mode-google-tasks-sync-engine--apply
     (token list-id file parent mode remote-tasks done)
@@ -788,6 +830,28 @@ into the push callback, and guards against any future regression."
           (org-mode-google-tasks-sync-engine--delete-local dupe file 'duplicate)
           (org-mode-google-tasks-sync-engine--log
            "Removed duplicate local (same GTASK_ID): %s"
+           (org-mode-google-tasks-sync-org-task-title dupe))))
+      ;; Duplicate-content removal: runs in both incremental and full
+      ;; modes.  Two local headings with different GTASK_IDs but
+      ;; identical canonical content (title, notes, status, due) are
+      ;; server-side duplicates the engine can't otherwise distinguish
+      ;; — each pulls/pushes independently and they feed back into each
+      ;; other every tick.  Reduce each content-hash group to the
+      ;; newest by :GTASK_UPDATED: (last heading in buffer order wins
+      ;; ties, mirroring `puthash' semantics in the ID-dedup above);
+      ;; older shadows are trash-snapshotted via `--delete-local' with
+      ;; reason `duplicate-content' so `restore-at-point' can recreate
+      ;; them as fresh tasks.  Only synced headings (those with a
+      ;; GTASK_ID and a stored hash) participate; new-task headings
+      ;; without an ID are left for the push path.  Covers duplicates
+      ;; at any level — top-level tasks and subtasks alike — because
+      ;; `local' contains all collected headings up to 2 levels deep.
+      (let ((content-dupes
+              (org-mode-google-tasks-sync-engine--collect-content-dupes local)))
+        (dolist (dupe content-dupes)
+          (org-mode-google-tasks-sync-engine--delete-local dupe file 'duplicate-content)
+          (org-mode-google-tasks-sync-engine--log
+           "Removed duplicate local (same content, different GTASK_ID): %s"
            (org-mode-google-tasks-sync-org-task-title dupe))))
       ;; Pass 1: top-level tasks (no parent).
       (dolist (r top-level)
@@ -960,23 +1024,46 @@ Returns nil when all positions are unique."
           pairs)))))
 
 (defun org-mode-google-tasks-sync-engine--collect-tie-pairs-one-level ()
-  "Return (ID . PREV-ID) pairs for duplicate positions among direct children.
+  "Return (ID FIRST-DUP-ID . PRE-PAIR-ID) triples for duplicate positions.
 Walks the direct synced children of the heading at point.  When two
 adjacent synced siblings share the same :GTASK_POSITION:, the second
-needs a `tasks.move' with `previous=<first-id>'.  Returns nil when
-all positions are unique or there are no synced children."
+needs a `tasks.move' with `previous=<first-id>'.  In a 3+-way tie
+\(A,B,C all sharing a position), every sibling past the first uses
+the *first* of the run as FIRST-DUP-ID so Google moves it past the
+stable anchor rather than past a sibling that is itself being
+repaired this pass.  PRE-PAIR-ID is the synced sibling immediately
+before the duplicate run (nil when the run starts at the front of
+the list); it is the fallback `previous' used when Google returns
+the same position for the first move (which happens when the task
+is already placed right after FIRST-DUP-ID).  Returns nil when all
+positions are unique or there are no synced children."
   (let ((parent-level (org-current-level))
         (pairs nil)
         (prev-id nil)
-        (prev-pos nil))
+        (prev-pos nil)
+        (run-start-id nil)
+        (pre-pair-id nil))
     (save-excursion
       (when (org-goto-first-child)
         (while (and (not (eobp))
                     (= (org-current-level) (1+ parent-level)))
           (let ((id (org-entry-get nil org-mode-google-tasks-sync-org--prop-id))
                 (pos (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))
-            (when (and id pos prev-id prev-pos (equal pos prev-pos))
-              (push (cons id prev-id) pairs))
+            (if (and id pos prev-pos (equal pos prev-pos))
+                ;; Continuing a duplicate run (2nd, 3rd, ... sibling
+                ;; with the same position).  Anchor against the
+                ;; *first* sibling of the run so a 3+-way tie
+                ;; converges instead of moving each sibling past the
+                ;; one before it (which would re-tie them).
+                (when (and id prev-id)
+                  (push (list id (or run-start-id prev-id) pre-pair-id) pairs))
+              ;; Position changed (or first sibling) — start a new
+              ;; potential run.  run-start-id remembers the first
+              ;; sibling of the current run; pre-pair-id remembers
+              ;; the synced sibling before the run started.
+              (setq run-start-id id)
+              (when (and prev-id prev-pos (not (equal pos prev-pos)))
+                (setq pre-pair-id prev-id)))
             (setq prev-id id
                   prev-pos pos))
           (unless (org-get-next-sibling)
@@ -993,7 +1080,10 @@ org buffer even when the callback fires in a plz curl buffer.  DONE
 is called when all tie repairs have completed (or immediately when
 there are no ties).  Each move response writes the fresh position
 into the heading's property, ensuring the subsequent `--sort-children'
-produces a stable order."
+produces a stable order.  When Google returns the same position for
+a move (the task was already placed there), `--repair-tie-queue'
+retries once with a different `previous' anchor so Google is forced
+to assign a genuinely new position."
   (let ((pairs (org-mode-google-tasks-sync-engine--collect-tie-pairs parent-marker)))
     (if (null pairs)
         (funcall done)
@@ -1005,25 +1095,92 @@ produces a stable order."
   "Process PAIRS serially, calling DONE when the queue is empty.
 TOKEN authenticates each move.  LIST-ID is the Google Tasks list.
 FILE is the source org file, threaded to `--write-move-result'.
-Each pair is (ID . PREV-ID); `tasks.move' is called with
-`previous=PREV-ID' to give ID a unique position after PREV-ID."
+Each pair is (ID FIRST-DUP-ID . PRE-PAIR-ID); the first move calls
+`tasks.move' with `previous=FIRST-DUP-ID' to give ID a unique
+position after FIRST-DUP-ID.  When Google returns the same position
+string (which happens when ID is already placed right after
+FIRST-DUP-ID), retry once with `previous=PRE-PAIR-ID' — or with
+`previous' omitted (move to the front of the list) when PRE-PAIR-ID
+is nil.  If the retry also returns the same position, log and
+advance: the stable sort keeps the duplicates adjacent so no
+reordering flap ensues."
   (if (null pairs)
       (funcall done)
     (let* ((pair (car pairs))
            (task-id (car pair))
-           (prev-id (cdr pair)))
-      (org-mode-google-tasks-sync-api-move-task
-       token list-id task-id
-       (lambda (resp)
-         (org-mode-google-tasks-sync-engine--write-move-result task-id resp file)
+           (first-dup-id (cadr pair))
+           (pre-pair-id (caddr pair)))
+      (org-mode-google-tasks-sync-engine--repair-tie-move
+       token list-id task-id first-dup-id pre-pair-id file
+       (lambda ()
          (org-mode-google-tasks-sync-engine--repair-tie-queue
-          token list-id (cdr pairs) file done))
-       (lambda (err)
-         (org-mode-google-tasks-sync-engine--log
-          "Tie repair move error: %S (task=%s)" err task-id)
-         (org-mode-google-tasks-sync-engine--repair-tie-queue
-          token list-id (cdr pairs) file done))
-       nil prev-id))))
+          token list-id (cdr pairs) file done))))))
+
+(defun org-mode-google-tasks-sync-engine--repair-tie-move
+    (token list-id task-id first-dup-id pre-pair-id file done)
+  "Fire one `tasks.move' for TASK-ID, retrying once on a no-op move.
+TOKEN authenticates the call.  LIST-ID is the Google Tasks list.
+TASK-ID is the heading being repaired.  FIRST-DUP-ID is the sibling
+the task is currently tied with (the first `previous' candidate).
+PRE-PAIR-ID is the synced sibling before the duplicate pair (the
+fallback `previous' when the first move is a no-op); nil means the
+pair is at the front of the list, so the retry moves TASK-ID to the
+front.  FILE is the source org file, threaded to
+`--write-move-result'.  DONE is called when this pair's repair
+finishes (regardless of outcome)."
+  (let ((current-pos
+         (org-mode-google-tasks-sync-engine--position-for-id task-id file)))
+    (org-mode-google-tasks-sync-api-move-task
+     token list-id task-id
+     (lambda (resp)
+       (let ((new-pos (alist-get 'position resp)))
+         (if (and current-pos new-pos (string= new-pos current-pos))
+             ;; Google returned the same position — the task was
+             ;; already placed there.  Retry once with the fallback
+             ;; anchor so Google is forced to compute a fresh
+             ;; position.  When PRE-PAIR-ID is nil, omit `previous'
+             ;; entirely (move to front).
+              (org-mode-google-tasks-sync-api-move-task
+               token list-id task-id
+               (lambda (resp2)
+                 (let ((new-pos2 (alist-get 'position resp2)))
+                   (if (and new-pos2 current-pos
+                            (string= new-pos2 current-pos))
+                       (org-mode-google-tasks-sync-engine--log
+                        "Tie repair stuck: tasks.move returned the same \
+position (%s) for task %s after retry; leaving duplicate in place"
+                        new-pos2 task-id)
+                     (org-mode-google-tasks-sync-engine--write-move-result
+                      task-id resp2 file)))
+                 (funcall done))
+              (lambda (err)
+                (org-mode-google-tasks-sync-engine--log
+                 "Tie repair retry move error: %S (task=%s)" err task-id)
+                (funcall done))
+              nil pre-pair-id)
+           ;; Position genuinely changed — write it and advance.
+           (org-mode-google-tasks-sync-engine--write-move-result
+            task-id resp file)
+           (funcall done))))
+     (lambda (err)
+       (org-mode-google-tasks-sync-engine--log
+        "Tie repair move error: %S (task=%s)" err task-id)
+       (funcall done))
+     nil first-dup-id)))
+
+(defun org-mode-google-tasks-sync-engine--position-for-id (task-id file)
+  "Return the current :GTASK_POSITION: of the heading with :GTASK_ID: TASK-ID.
+FILE is the source org file (the search happens in that buffer).
+Returns nil when the heading can't be found or has no position."
+  (when (and task-id file)
+    (let ((marker (org-mode-google-tasks-sync-org-find-marker-by-gtask-id
+                   file task-id)))
+      (when (and marker (marker-buffer marker))
+        (with-current-buffer (marker-buffer marker)
+          (save-excursion
+            (goto-char marker)
+            (org-back-to-heading t)
+            (org-entry-get nil org-mode-google-tasks-sync-org--prop-position)))))))
 
 (defun org-mode-google-tasks-sync-engine--write-move-result (task-id resp &optional file)
   "Write the position from a move RESP into the heading with :GTASK_ID: TASK-ID.
@@ -1650,7 +1807,15 @@ push queue to fire the next pending insert."
      (lambda (err)
        (org-mode-google-tasks-sync-engine--log "Insert error: %S (task=%s)"
                                           err
-                                          (org-mode-google-tasks-sync-org-task-title task)))
+                                          (org-mode-google-tasks-sync-org-task-title task))
+       ;; Advance the serialized push queue even on insert failure.
+       ;; Without this, `--push-new-queue' would stall on the first
+       ;; error: `done' (and therefore `--finalize-apply' → drift →
+       ;; tie repair → sort → save) would never run, leaving the
+       ;; buffer un-repaired and un-saved.  The failed task stays
+       ;; without a :GTASK_ID: and will be re-queued on the next
+       ;; tick (it's still in the local set with no ID).
+       (when on-success (funcall on-success nil)))
      insert-args)))
 
 (defun org-mode-google-tasks-sync-engine--resolve-parent-id (task)

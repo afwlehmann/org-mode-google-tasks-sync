@@ -668,6 +668,218 @@ headings on every sync."
       (when (get-buffer "*org-mode-google-tasks-sync-trash*")
         (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
 
+;;; -- duplicate content (different GTASK_ID, same hash) dedup -----------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/dedup-content-dupes-keeps-newest-by-updated ()
+  "`--apply' reduces local headings with the same canonical
+content hash but different GTASK_IDs to the newest by
+:GTASK_UPDATED:.  Without this, two server-side duplicates
+\(same title/notes/due, different IDs) pull/push independently
+and feed back into each other every tick.  Older shadows are
+trash-snapshotted with reason `duplicate-content' so
+`restore-at-point' can recreate them as fresh tasks."
+  (let ((file (make-temp-file "gtasks-content-dedup" nil ".org")))
+    (unwind-protect
+        (progn
+          (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+            (kill-buffer "*org-mode-google-tasks-sync-trash*"))
+          (with-temp-file file
+            ;; Two headings with identical content hash but different
+            ;; GTASK_IDs.  The first is older (2026-01-01), the second
+            ;; is newer (2026-02-01).  The newer should survive.
+            (insert "* Tasks\n"
+                    "** TODO Nebenkostenabrechnung\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-old\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: sharedhash\n"
+                    "   :END:\n"
+                    "** TODO Nebenkostenabrechnung\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-new\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-02-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: sharedhash\n"
+                    "   :END:\n"))
+          ;; Remote carries both IDs (they are independent server
+          ;; tasks); the dedup must still fire because the *local*
+          ;; buffer has two headings with the same content hash.
+          (let ((remote `(((id . "id-old")
+                           (title . "Nebenkostenabrechnung")
+                           (status . "needsAction")
+                           (updated . "2026-01-01T00:00:00.000Z"))
+                          ((id . "id-new")
+                           (title . "Nebenkostenabrechnung")
+                           (status . "needsAction")
+                           (updated . "2026-02-01T00:00:00.000Z")))))
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                      (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                       (lambda (_token _list-id _tasks _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                       (lambda (_token _list-id _pairs _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                       (lambda (_token _list-id _parent _file done)
+                         (funcall done))))
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'incremental
+               remote
+               #'ignore)))
+          (with-current-buffer (find-file-noselect file)
+            (widen)
+            (goto-char (point-min))
+            ;; Exactly one heading survives — the newer one.
+            (should (re-search-forward
+                     (concat "GTASK_ID: id-new") nil t))
+            (goto-char (point-min))
+            (should-not (re-search-forward
+                         (concat "GTASK_ID: id-old") nil t))
+            ;; The older shadow was snapshotted to trash with the
+            ;; `duplicate-content' reason.
+            (with-current-buffer (get-buffer-create
+                                  "*org-mode-google-tasks-sync-trash*")
+              (goto-char (point-min))
+              (should (re-search-forward "id-old" nil t))
+              (should (re-search-forward "duplicate-content" nil t)))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file)
+      (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+        (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/dedup-content-dupes-tie-breaks-by-last-in-buffer ()
+  "When two same-content headings share the same :GTASK_UPDATED:,
+the last one in buffer order wins (mirroring `puthash' semantics
+in the ID-dedup)."
+  (let ((file (make-temp-file "gtasks-content-tie" nil ".org")))
+    (unwind-protect
+        (progn
+          (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+            (kill-buffer "*org-mode-google-tasks-sync-trash*"))
+          (with-temp-file file
+            ;; Same content hash, same updated timestamp, different IDs.
+            (insert "* Tasks\n"
+                    "** TODO Twin\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-first\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: sharedhash\n"
+                    "   :END:\n"
+                    "** TODO Twin\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-second\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: sharedhash\n"
+                    "   :END:\n"))
+          (let ((remote `(((id . "id-first")
+                           (title . "Twin")
+                           (status . "needsAction")
+                           (updated . "2026-01-01T00:00:00.000Z"))
+                          ((id . "id-second")
+                           (title . "Twin")
+                           (status . "needsAction")
+                           (updated . "2026-01-01T00:00:00.000Z")))))
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                      (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                       (lambda (_token _list-id _tasks _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                       (lambda (_token _list-id _pairs _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                       (lambda (_token _list-id _parent _file done)
+                         (funcall done))))
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'incremental
+               remote
+               #'ignore)))
+          (with-current-buffer (find-file-noselect file)
+            (widen)
+            (goto-char (point-min))
+            ;; The second (last-in-buffer) wins.
+            (should (re-search-forward "GTASK_ID: id-second" nil t))
+            (goto-char (point-min))
+            (should-not (re-search-forward "GTASK_ID: id-first" nil t))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file)
+      (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+        (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/dedup-content-dupes-leaves-distinct-content-untouched ()
+  "Headings with different canonical content (different titles)
+are not deduped even when they share a stored :GTASK_CONTENT_HASH:
+placeholder.  The dedup computes the canonical hash from the task
+struct, not the stored property, so test fixtures with placeholder
+hashes don't trip it."
+  (let ((file (make-temp-file "gtasks-content-distinct" nil ".org")))
+    (unwind-protect
+        (progn
+          (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+            (kill-buffer "*org-mode-google-tasks-sync-trash*"))
+          (with-temp-file file
+            ;; Different titles → different canonical hashes → not
+            ;; deduped, even though the stored :GTASK_CONTENT_HASH:
+            ;; placeholder is the same.
+            (insert "* Tasks\n"
+                    "** TODO Buy milk\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-a\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: placeholder\n"
+                    "   :END:\n"
+                    "** TODO Buy bread\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-b\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-02-01T00:00:00.000Z\n"
+                    "   :GTASK_CONTENT_HASH: placeholder\n"
+                    "   :END:\n"))
+          (let ((remote `(((id . "id-a")
+                           (title . "Buy milk")
+                           (status . "needsAction")
+                           (updated . "2026-01-01T00:00:00.000Z"))
+                          ((id . "id-b")
+                           (title . "Buy bread")
+                           (status . "needsAction")
+                           (updated . "2026-02-01T00:00:00.000Z")))))
+            (cl-letf (((symbol-function 'org-mode-google-tasks-sync-engine--push-update)
+                      (lambda (&rest _) t))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--push-new-queue)
+                       (lambda (_token _list-id _tasks _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--resolve-reorder-drift)
+                       (lambda (_token _list-id _pairs _file done)
+                         (funcall done)))
+                      ((symbol-function 'org-mode-google-tasks-sync-engine--repair-position-ties)
+                       (lambda (_token _list-id _parent _file done)
+                         (funcall done))))
+              (org-mode-google-tasks-sync-engine--apply
+               nil "L" file "Tasks" 'incremental
+               remote
+               #'ignore)))
+          (with-current-buffer (find-file-noselect file)
+            (widen)
+            (goto-char (point-min))
+            ;; Both headings survive — distinct canonical hashes.
+            (should (re-search-forward "GTASK_ID: id-a" nil t))
+            (should (re-search-forward "GTASK_ID: id-b" nil t))
+            (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+              (set-buffer-modified-p nil))
+            (kill-buffer)))
+      (delete-file file)
+      (when (get-buffer "*org-mode-google-tasks-sync-trash*")
+        (kill-buffer "*org-mode-google-tasks-sync-trash*")))))
+
 ;;; -- showCompleted pinned in list-tasks query -------------------------------
 
 ;;; -- hidden tasks are filtered and removed locally --------------------------
@@ -1134,6 +1346,54 @@ prior task's ID in the buffer."
        nil "L" nil "/dev/null" (lambda () (setq called-done t))))
     (should called-done)))
 
+(ert-deftest org-mode-google-tasks-sync-engine-test/push-new-advances-queue-on-insert-error ()
+  "`--push-new' must call ON-SUCCESS even when the insert fails,
+so `--push-new-queue' advances to the next task.  Without this,
+a single insert error would stall the queue: `done' (and
+`--finalize-apply' → drift → tie repair → sort → save) would
+never run, leaving the buffer un-repaired and un-saved.  The
+failed task stays without a :GTASK_ID: and will be re-queued
+on the next tick."
+  (let ((file (make-temp-file "gtasks-push-err" nil ".org"))
+        (insert-call-count 0)
+        (on-success-call-count 0))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO First\n"
+                    "** TODO Second\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-insert-task)
+                     (lambda (_token _list-id _data then else _query-args)
+                       (setq insert-call-count (1+ insert-call-count))
+                       (if (= insert-call-count 1)
+                           ;; First insert fails.
+                           (funcall else (cons 'plz-error nil))
+                         ;; Second insert succeeds.
+                         (funcall then '((id . "gen-id-2")
+                                         (updated . "u")
+                                         (etag . "e")))))))
+            (with-current-buffer (find-file-noselect file)
+              (let (tasks)
+                (save-excursion
+                  (goto-char (point-min))
+                  (re-search-forward "^\\*\\* TODO First")
+                  (push (org-mode-google-tasks-sync-org-read-task-at-point "L") tasks)
+                  (re-search-forward "^\\*\\* TODO Second")
+                  (push (org-mode-google-tasks-sync-org-read-task-at-point "L") tasks))
+                (org-mode-google-tasks-sync-engine--push-new-queue
+                 nil "L" (nreverse tasks) file
+                 (lambda () (setq on-success-call-count (1+ on-success-call-count))))))))
+      ;; Both inserts fired (the queue didn't stall on the first
+      ;; error), and the queue's done callback ran exactly once.
+      (should (= 2 insert-call-count))
+      (should (= 1 on-success-call-count))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
 ;;; -- position-tie repair -----------------------------------------------------
 
 (ert-deftest org-mode-google-tasks-sync-engine-test/repair-ties-fires-move-for-duplicates ()
@@ -1476,6 +1736,204 @@ subsequent sort would produce an unstable order among subtasks)."
       (should (= 1 (length captured-moves)))
       (should (equal "id-bsub" (caar captured-moves)))
       (should (equal "id-asub" (cdar captured-moves)))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+;;; -- position-tie repair: retry on no-op move --------------------------------
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/repair-ties-retries-when-google-returns-same-position ()
+  "`--repair-position-ties' retries `tasks.move' with a different
+`previous' when Google returns the same position string the heading
+already has.  Regression for the bug where the second of two
+adjacent duplicates was already placed right after the first, so
+Google returned the same position and the duplicate survived every
+sync.  The retry uses `previous=<pre-pair-id>' (the synced sibling
+before the duplicate pair) so Google is forced to compute a
+genuinely new position."
+  (let ((file (make-temp-file "gtasks-tie-retry" nil ".org"))
+        (call-count 0)
+        captured-previous)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            ;; pre-pair-id = id-anchor (position 00), then a duplicate
+            ;; pair at position 01: id-dup1 and id-dup2.
+            (insert "* Tasks\n"
+                    "** TODO Anchor\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-anchor\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Dup1\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-dup1\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Dup2\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-dup2\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                     (lambda (_token _list-id task-id then _else new-parent previous-id)
+                       (setq call-count (1+ call-count))
+                       (push (cons task-id previous-id) captured-previous)
+                       ;; First call returns the same position the
+                       ;; heading already has (no-op).  Retry returns
+                       ;; a fresh position.
+                       (if (= call-count 1)
+                           (funcall then '((position . "00000000000000000001")))
+                         (funcall then '((position . "00000000000000000002")))))))
+            (with-current-buffer (find-file-noselect file)
+              (let ((parent-marker (save-excursion
+                                      (goto-char (point-min))
+                                      (re-search-forward "^\\* Tasks")
+                                      (point-marker))))
+                (org-mode-google-tasks-sync-engine--repair-position-ties
+                 nil "L" parent-marker file #'ignore)))))
+      ;; Two moves fired: first with previous=id-dup1, retry with
+      ;; previous=id-anchor (the synced sibling before the duplicate
+      ;; pair).
+      (should (= 2 call-count))
+      (let ((moves (nreverse captured-previous)))
+        (should (equal "id-dup2" (car (nth 0 moves))))
+        (should (equal "id-dup1" (cdr (nth 0 moves))))
+        (should (equal "id-dup2" (car (nth 1 moves))))
+        (should (equal "id-anchor" (cdr (nth 1 moves)))))
+      ;; The heading's position was updated to the retry's response.
+      (with-current-buffer (find-file-noselect file)
+        (goto-char (point-min))
+        (re-search-forward "id-dup2")
+        (should (equal "00000000000000000002"
+                       (org-entry-get nil "GTASK_POSITION")))
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/repair-ties-retry-moves-to-front-when-pair-at-front ()
+  "`--repair-position-ties' retry omits `previous' (moves to the
+front of the list) when the duplicate pair starts at the front of
+the sibling list — i.e. when there is no pre-pair sibling to anchor
+against."
+  (let ((file (make-temp-file "gtasks-tie-front" nil ".org"))
+        (call-count 0)
+        captured-previous)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            ;; Duplicate pair at the front (positions 00, 00), then a
+            ;; unique sibling at position 01.
+            (insert "* Tasks\n"
+                    "** TODO Dup1\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-dup1\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Dup2\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-dup2\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Unique\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-unique\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000001\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                     (lambda (_token _list-id task-id then _else new-parent previous-id)
+                       (setq call-count (1+ call-count))
+                       (push (cons task-id previous-id) captured-previous)
+                       (if (= call-count 1)
+                           (funcall then '((position . "00000000000000000000")))
+                         (funcall then '((position . "00000000000000000002")))))))
+            (with-current-buffer (find-file-noselect file)
+              (let ((parent-marker (save-excursion
+                                      (goto-char (point-min))
+                                      (re-search-forward "^\\* Tasks")
+                                      (point-marker))))
+                (org-mode-google-tasks-sync-engine--repair-position-ties
+                 nil "L" parent-marker file #'ignore)))))
+      (should (= 2 call-count))
+      ;; First call: previous=id-dup1.  Retry: previous=nil (front).
+      (let ((moves (nreverse captured-previous)))
+        (should (equal "id-dup2" (car (nth 0 moves))))
+        (should (equal "id-dup1" (cdr (nth 0 moves))))
+        (should (equal "id-dup2" (car (nth 1 moves))))
+        (should (null (cdr (nth 1 moves)))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
+          (set-buffer-modified-p nil))
+        (kill-buffer))
+      (delete-file file))))
+
+(ert-deftest org-mode-google-tasks-sync-engine-test/repair-ties-advances-when-retry-also-noop ()
+  "`--repair-position-ties' advances the queue when the retry also
+returns the same position, instead of looping forever.  The
+duplicate stays in place; the stable sort keeps the siblings
+adjacent so no flapping ensues."
+  (let ((file (make-temp-file "gtasks-tie-stuck" nil ".org"))
+        (call-count 0))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks\n"
+                    "** TODO Dup1\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-dup1\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"
+                    "** TODO Dup2\n"
+                    "   :PROPERTIES:\n"
+                    "   :GTASK_ID: id-dup2\n"
+                    "   :GTASK_LIST: L\n"
+                    "   :GTASK_UPDATED: 2026-01-01T00:00:00.000Z\n"
+                    "   :GTASK_POSITION: 00000000000000000000\n"
+                    "   :GTASK_CONTENT_HASH: x\n"
+                    "   :END:\n"))
+          (cl-letf (((symbol-function 'org-mode-google-tasks-sync-api-move-task)
+                     (lambda (_token _list-id _task-id then _else _new-parent _previous-id)
+                       (setq call-count (1+ call-count))
+                       ;; Always return the same position — both the
+                       ;; initial move and the retry are no-ops.
+                       (funcall then '((position . "00000000000000000000")))))
+                   ((symbol-function 'org-mode-google-tasks-sync-engine--log)
+                    (lambda (&rest _) nil)))
+            (with-current-buffer (find-file-noselect file)
+              (let ((parent-marker (save-excursion
+                                      (goto-char (point-min))
+                                      (re-search-forward "^\\* Tasks")
+                                      (point-marker)))
+                    done-called)
+                (org-mode-google-tasks-sync-engine--repair-position-ties
+                 nil "L" parent-marker file (lambda () (setq done-called t)))
+                (should done-called)))))
+      ;; Two calls (initial + retry), no infinite loop.
+      (should (= 2 call-count))
       (with-current-buffer (find-file-noselect file)
         (let ((org-mode-google-tasks-sync-engine--inhibit-save-hooks t))
           (set-buffer-modified-p nil))
