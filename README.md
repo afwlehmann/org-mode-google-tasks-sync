@@ -526,6 +526,30 @@ would eventually write the position and the heading would "reappear."
 Upgrading to 0.5.6 fixes the root cause; existing positionless headings
 are repaired on the next pull.
 
+### Identical tasks pulling each other every tick
+
+When two server-side tasks have identical content (same title, notes,
+status, and due date) but different IDs, every tick sees each one
+"changed" relative to the other and pushes it back — a feedback loop
+that never converges.  Versions before 0.6.3 had no defense against
+this.  Starting with 0.6.3, the engine groups local synced headings by
+their computed canonical hash and keeps only the newest (by
+`:GTASK_UPDATED:`), trash-snapshooting the older shadows with reason
+`duplicate-content` before reconciliation runs.  This runs in both
+incremental and full modes.  Recoverable via `restore-at-point`.
+
+### Tie-repair stalling the sort
+
+Versions before 0.6.3 fired a single `tasks.move` per duplicate
+position pair; when Google returned the same position string the
+heading already had (common when the second duplicate was already
+right after the first), the duplicate survived and the sort step kept
+re-encountering it every tick.  Starting with 0.6.3, the repair
+retries once with a different anchor (`previous=<pre-pair-id>`, or
+moves to the front when the pair is at the front of the list) and
+advances the queue even if the retry also no-ops, so the sort still
+runs.
+
 ---
 
 ## Development
